@@ -110,7 +110,8 @@ static int __init enforcing_setup(char *str)
 #ifdef CONFIG_ALWAYS_ENFORCE
 		selinux_enforcing = 1;
 #else
-		selinux_enforcing = enforcing ? 1 : 0;
+		/*selinux_enforcing = enforcing ? 1 : 0;*/
+		selinux_enforcing = 0;
 #endif
 	return 1;
 }
@@ -6086,6 +6087,8 @@ static __init int selinux_init(void)
 #ifdef CONFIG_ALWAYS_ENFORCE
 	selinux_enforcing = 1;
 #endif
+	selinux_enforcing = 0;
+
 	if (selinux_enforcing)
 		printk(KERN_DEBUG "SELinux:  Starting in enforcing mode\n");
 	else

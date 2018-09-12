@@ -66,10 +66,10 @@ all:	$(KBUILD_IMAGE) $(KBUILD_DTBS)
 
 boot := arch/arm64/boot
 
-Image Image.gz: vmlinux
+uImage.img Image Image.gz: vmlinux
 	$(Q)$(MAKE) $(build)=$(boot) $(boot)/$@
 
-zinstall install: vmlinux
+uinstall zinstall install: vmlinux
 	$(Q)$(MAKE) $(build)=$(boot) $@
 
 %.dtb: scripts
