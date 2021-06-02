@@ -29,6 +29,7 @@
 #define OTGSC_STS_1MS_TOGGLE			0x00002000
 #define OTGSC_STS_DATA_PULSING			0x00004000
 #define OTGSC_INTSTS_USB_ID			0x00010000
+#define PORTSCX_PORT_PHCD			0x00800000
 #define OTGSC_INTSTS_A_VBUS_VALID		0x00020000
 #define OTGSC_INTSTS_A_SESSION_VALID		0x00040000
 #define OTGSC_INTSTS_B_SESSION_VALID		0x00080000
@@ -137,11 +138,12 @@ struct mv_otg_regs {
 
 struct mv_otg {
 	struct usb_phy phy;
+	struct usb_phy *outer_phy;
 	struct mv_otg_ctrl otg_ctrl;
 
 	/* base address */
-	void __iomem *phy_regs;
 	void __iomem *cap_regs;
+	void __iomem *apmu_base;
 	struct mv_otg_regs __iomem *op_regs;
 
 	struct platform_device *pdev;
@@ -155,10 +157,16 @@ struct mv_otg {
 	spinlock_t wq_lock;
 
 	struct mv_usb_platform_data *pdata;
+	struct notifier_block notifier;
+	struct notifier_block notifier_charger;
+
+	struct pm_qos_request   qos_idle;
+	s32                     lpm_qos;
 
 	unsigned int active;
 	unsigned int clock_gating;
 	struct clk *clk;
+	unsigned int charger_type;
 };
 
 #endif

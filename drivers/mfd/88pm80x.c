@@ -18,17 +18,14 @@
 #include <linux/uaccess.h>
 #include <linux/err.h>
 
-/* 88pm80x chips have same definition for chip id register. */
-#define PM80X_CHIP_ID			(0x00)
-#define PM80X_CHIP_ID_NUM(x)		(((x) >> 5) & 0x7)
-#define PM80X_CHIP_ID_REVISION(x)	((x) & 0x1F)
-
 struct pm80x_chip_mapping {
 	unsigned int	id;
 	int		type;
 };
 
 static struct pm80x_chip_mapping chip_mapping[] = {
+	/* 88PM822 chip id number */
+	{0x4,	CHIP_PM822},
 	/* 88PM800 chip id number */
 	{0x3,	CHIP_PM800},
 	/* 88PM805 chip id number */
@@ -84,12 +81,18 @@ int pm80x_init(struct i2c_client *client)
 		return ret;
 	}
 
+	chip->chip_id = val;
+	dev_info(chip->dev, "pmic id: 0x%x\n", val);
+
 	for (i = 0; i < ARRAY_SIZE(chip_mapping); i++) {
 		if (chip_mapping[i].id == PM80X_CHIP_ID_NUM(val)) {
 			chip->type = chip_mapping[i].type;
 			break;
 		}
 	}
+
+	if (val == CHIP_PM86X_ID_A0 || val == CHIP_PM86X_ID_Z3)
+		chip->type = CHIP_PM86X;
 
 	if (i == ARRAY_SIZE(chip_mapping)) {
 		dev_err(chip->dev,

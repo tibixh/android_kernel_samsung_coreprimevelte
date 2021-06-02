@@ -24,8 +24,19 @@
 #include <linux/init.h>
 #include <linux/nmi.h>
 
+#ifdef CONFIG_PXA_RAMDUMP
+#include <linux/ramdump.h>
+#endif
+#ifdef CONFIG_SEC_DEBUG
+#include <linux/sec-debug.h>
+#include <linux/arm-coresight.h>
+#endif
+
 #define PANIC_TIMER_STEP 100
 #define PANIC_BLINK_SPD 18
+
+/* Machine specific panic information string */
+char *mach_panic_string;
 
 int panic_on_oops = CONFIG_PANIC_ON_OOPS_VALUE;
 static unsigned long tainted_mask;
@@ -74,6 +85,11 @@ void panic(const char *fmt, ...)
 	long i, i_next = 0;
 	int state = 0;
 
+#ifdef CONFIG_SEC_DEBUG
+	arch_stop_trace();
+
+	stop_ftracing();
+#endif
 	/*
 	 * Disable local interrupts. This will prevent panic_smp_self_stop
 	 * from deadlocking the first cpu that invokes the panic, since
@@ -107,6 +123,14 @@ void panic(const char *fmt, ...)
 	 */
 	if (!test_taint(TAINT_DIE) && oops_in_progress <= 1)
 		dump_stack();
+#endif
+
+#ifdef CONFIG_PXA_RAMDUMP
+	/*
+	 * Panic text is not available otherwise, at least
+	 * not via kexec, so save it now.
+	 */
+	ramdump_save_panic_text(buf);
 #endif
 
 	/*
@@ -380,6 +404,11 @@ late_initcall(init_oops_id);
 void print_oops_end_marker(void)
 {
 	init_oops_id();
+
+	if (mach_panic_string)
+		printk(KERN_WARNING "Board Information: %s\n",
+		       mach_panic_string);
+
 	printk(KERN_WARNING "---[ end trace %016llx ]---\n",
 		(unsigned long long)oops_id);
 }

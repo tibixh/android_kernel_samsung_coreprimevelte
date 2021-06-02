@@ -12,6 +12,7 @@
 #include <linux/io.h>
 #include <linux/irqchip.h>
 #include <linux/of_platform.h>
+#include <linux/clocksource.h>
 #include <asm/mach/arch.h>
 #include <asm/mach/time.h>
 
@@ -35,6 +36,14 @@ static void __init mmp2_dt_init(void)
 {
 	of_platform_populate(NULL, of_default_bus_match_table,
 			     mmp2_auxdata_lookup, NULL);
+}
+
+static void __init mmp2_dt_init_timer(void)
+{
+	/* TODO: clock framework initialization. */
+
+	/* Initialize timers. */
+	clocksource_of_init();
 }
 
 static const char *mmp2_dt_board_compat[] __initdata = {

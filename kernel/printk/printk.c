@@ -54,6 +54,10 @@
 #include "console_cmdline.h"
 #include "braille.h"
 
+#ifdef CONFIG_EARLY_PRINTK_DIRECT
+extern void printascii(char *);
+#endif
+
 /* printk's without a loglevel use this.. */
 #define DEFAULT_MESSAGE_LOGLEVEL CONFIG_DEFAULT_MESSAGE_LOGLEVEL
 
@@ -74,6 +78,9 @@ int console_printk[4] = {
  */
 int oops_in_progress;
 EXPORT_SYMBOL(oops_in_progress);
+
+int keep_silent = 0;
+EXPORT_SYMBOL(keep_silent);
 
 /*
  * console_sem protects the console_drivers list, and also
@@ -250,6 +257,22 @@ static char __log_buf[__LOG_BUF_LEN] __aligned(LOG_ALIGN);
 static char *log_buf = __log_buf;
 static u32 log_buf_len = __LOG_BUF_LEN;
 
+static u64 print_clock(void)
+{
+	struct timespec ts;
+	u64 ts_nsec;
+
+	read_persistent_clock(&ts);
+	if (!ts.tv_sec && !ts.tv_nsec) {
+		ts_nsec = local_clock();
+		ts = ns_to_timespec(ts_nsec);
+		monotonic_to_bootbased(&ts);
+	}
+	ts_nsec = timespec_to_ns(&ts);
+
+	return ts_nsec;
+}
+
 /* cpu currently holding logbuf_lock */
 static volatile unsigned int logbuf_cpu = UINT_MAX;
 
@@ -297,6 +320,51 @@ static u32 log_next(u32 idx)
 	return idx + msg->len;
 }
 
+#if defined(CONFIG_PRINTK_CPU_ID)
+static bool printk_cpu_id = true;
+#else
+static bool printk_cpu_id;
+#endif
+module_param_named(cpu, printk_cpu_id, bool, S_IRUGO | S_IWUSR);
+
+#if defined(CONFIG_PRINTK_PID)
+static bool printk_pid = true;
+#else
+static bool printk_pid;
+#endif
+module_param_named(pid, printk_pid, bool, S_IRUGO | S_IWUSR);
+
+#if defined(CONFIG_PRINTK_COMM)
+static bool printk_comm = true;
+#else
+static bool printk_comm;
+#endif
+module_param_named(comm, printk_comm, bool, S_IRUGO | S_IWUSR);
+
+#ifdef CONFIG_SEC_LOG
+static void (*log_text_hook)(char *text, unsigned int size);
+static char *seclog_buf;
+static unsigned int *seclog_ptr;
+static unsigned int seclog_size;
+static char sec_text[1024]; /* buffer size: LOG_LINE_MAX + PREFIX_MAX */
+void register_log_text_hook(void (*f)(char *text, unsigned int size), char *buf,
+	unsigned int *position, unsigned int bufsize)
+{
+	unsigned long flags;
+	raw_spin_lock_irqsave(&logbuf_lock, flags);
+	if (buf && bufsize) {
+		seclog_buf = buf;
+		seclog_ptr = position;
+		seclog_size = bufsize;
+		log_text_hook = f;
+	}
+	raw_spin_unlock_irqrestore(&logbuf_lock, flags);
+}
+EXPORT_SYMBOL(register_log_text_hook);
+static size_t msg_print_text(const struct printk_log *msg, enum log_flags prev,
+			     bool syslog, char *buf, size_t size);
+#endif
+
 /* insert record into the buffer, discard old ones, update heads */
 static void log_store(int facility, int level,
 		      enum log_flags flags, u64 ts_nsec,
@@ -304,10 +372,20 @@ static void log_store(int facility, int level,
 		      const char *text, u16 text_len)
 {
 	struct printk_log *msg;
-	u32 size, pad_len;
+	u32 size, pad_len, prefix_len = 0;
+	char prefix[TASK_COMM_LEN + 20];
+
+	if (printk_cpu_id)
+		prefix_len += sprintf(prefix, "C%u ", smp_processor_id());
+	if (printk_pid)
+		prefix_len += sprintf(prefix+prefix_len, "%5u ",
+				task_pid_nr(current));
+	if (printk_comm)
+		prefix_len += sprintf(prefix+prefix_len, "(%15s) ",
+				current->comm);
 
 	/* number of '\0' padding bytes to next message */
-	size = sizeof(struct printk_log) + text_len + dict_len;
+	size = sizeof(struct printk_log) + prefix_len + text_len + dict_len;
 	pad_len = (-size) & (LOG_ALIGN - 1);
 	size += pad_len;
 
@@ -339,8 +417,10 @@ static void log_store(int facility, int level,
 
 	/* fill message */
 	msg = (struct printk_log *)(log_buf + log_next_idx);
-	memcpy(log_text(msg), text, text_len);
-	msg->text_len = text_len;
+	if (prefix_len)
+		memcpy(log_text(msg), prefix, prefix_len);
+	memcpy(log_text(msg) + prefix_len, text, text_len);
+	msg->text_len = prefix_len + text_len;
 	memcpy(log_dict(msg), dict, dict_len);
 	msg->dict_len = dict_len;
 	msg->facility = facility;
@@ -349,10 +429,18 @@ static void log_store(int facility, int level,
 	if (ts_nsec > 0)
 		msg->ts_nsec = ts_nsec;
 	else
-		msg->ts_nsec = local_clock();
+		msg->ts_nsec = print_clock();
 	memset(log_dict(msg) + dict_len, 0, pad_len);
-	msg->len = sizeof(struct printk_log) + text_len + dict_len + pad_len;
+	msg->len = sizeof(struct printk_log) + msg->text_len + dict_len + pad_len;
 
+#ifdef CONFIG_SEC_LOG
+	if (log_text_hook) {
+		size = msg_print_text(msg, msg->flags, true,
+			sec_text, 1024);
+
+		log_text_hook(sec_text, size);
+	}
+#endif
 	/* insert message */
 	log_next_idx += msg->len;
 	log_next_seq++;
@@ -420,7 +508,11 @@ static ssize_t devkmsg_writev(struct kiocb *iocb, const struct iovec *iv,
 	char *buf, *line;
 	int i;
 	int level = default_message_loglevel;
+#if defined(CONFIG_SEC_DEBUG)
+	int facility = 0;	/* SEC_DEBUG LOG_USER */
+#else
 	int facility = 1;	/* LOG_USER */
+#endif
 	size_t len = iov_length(iv, count);
 	ssize_t ret = len;
 
@@ -733,6 +825,18 @@ void log_buf_kexec_setup(void)
 /* requested log_buf_len from kernel cmdline */
 static unsigned long __initdata new_log_buf_len;
 
+#ifdef CONFIG_PXA_RAMDUMP
+#include <linux/ramdump.h>
+static int __init printk_ramdump_register(void)
+{
+	ramdump_attach_cbuffer("printk",
+		(void **)&log_buf, &log_buf_len, &log_next_idx,
+		sizeof(log_buf[0]));
+	return 0;
+}
+late_initcall(printk_ramdump_register);
+#endif
+
 /* save requested log_buf_len since it's too early to process it */
 static int __init log_buf_len_setup(char *str)
 {
@@ -786,7 +890,7 @@ static bool __read_mostly ignore_loglevel;
 
 static int __init ignore_loglevel_setup(char *str)
 {
-	ignore_loglevel = 1;
+	ignore_loglevel = true;
 	pr_info("debug: ignoring loglevel setting.\n");
 
 	return 0;
@@ -853,7 +957,7 @@ static inline void boot_delay_msec(int level)
 #endif
 
 #if defined(CONFIG_PRINTK_TIME)
-static bool printk_time = 1;
+static bool printk_time = true;
 #else
 static bool printk_time;
 #endif
@@ -1440,7 +1544,7 @@ static bool cont_add(int facility, int level, const char *text, size_t len)
 		cont.facility = facility;
 		cont.level = level;
 		cont.owner = current;
-		cont.ts_nsec = local_clock();
+		cont.ts_nsec = print_clock();
 		cont.flags = 0;
 		cont.cons = 0;
 		cont.flushed = false;
@@ -1568,6 +1672,11 @@ asmlinkage int vprintk_emit(int facility, int level,
 		}
 	}
 
+#ifdef CONFIG_EARLY_PRINTK_DIRECT
+	if (console_drivers == NULL)
+		printascii(text);
+#endif
+
 	if (level == -1)
 		level = default_message_loglevel;
 
@@ -1675,6 +1784,9 @@ asmlinkage int printk(const char *fmt, ...)
 {
 	va_list args;
 	int r;
+
+	if (unlikely(keep_silent))
+		return 0;
 
 #ifdef CONFIG_KGDB_KDB
 	if (unlikely(kdb_trap_printk)) {
@@ -1853,12 +1965,12 @@ int update_console_cmdline(char *name, int idx, char *name_new, int idx_new, cha
 	return -1;
 }
 
-bool console_suspend_enabled = 1;
+bool console_suspend_enabled = true;
 EXPORT_SYMBOL(console_suspend_enabled);
 
 static int __init console_suspend_disable(char *str)
 {
-	console_suspend_enabled = 0;
+	console_suspend_enabled = false;
 	return 1;
 }
 __setup("no_console_suspend", console_suspend_disable);
@@ -1880,6 +1992,7 @@ void suspend_console(void)
 	console_lock();
 	console_suspended = 1;
 	up(&console_sem);
+	mutex_release(&console_lock_dep_map, 1, _RET_IP_);
 }
 
 void resume_console(void)
@@ -1887,6 +2000,7 @@ void resume_console(void)
 	if (!console_suspend_enabled)
 		return;
 	down(&console_sem);
+	mutex_acquire(&console_lock_dep_map, 0, 0, _RET_IP_);
 	console_suspended = 0;
 	console_unlock();
 }

@@ -411,6 +411,10 @@ config TI_DAC7512
 	  This driver can also be built as a module. If so, the module
 	  will be called ti_dac7512.
 
+config UID_STAT
+	bool "UID based statistics tracking exported to /proc/uid_stat"
+	default n
+
 config VMWARE_BALLOON
 	tristate "VMware Balloon Driver"
 	depends on X86 && HYPERVISOR_GUEST
@@ -514,6 +518,58 @@ config SRAM
 	  This driver allows you to declare a memory region to be managed by
 	  the genalloc API. It is supposed to be used for small on-chip SRAM
 	  areas found on many SoCs.
+
+config CORESIGHT_SUPPORT
+	bool "support coresight features"
+	help
+	  Support coresight features such as dump pcsr, trigger panic etc.
+
+config CORESIGHT_TRACE_SUPPORT
+	bool "support save/restore coresight trace setting when enter/exit LPM"
+	depends on CORESIGHT_SUPPORT
+	help
+	  Enables support save/restore coresight trace setting when enter/exit LPM.
+
+config MMP_GPS
+        tristate "Marvell GPS misc driver"
+        depends on GPIOLIB && REGULATOR && SYSFS
+        default n
+	help
+          Creates an entry in sysfs for Marvell GPS chips to control
+	  power/clock, enable/disable.
+
+config GATOR
+	tristate "Support ARM DS5"
+	depends on PERF_EVENTS && PROFILING
+	depends on HIGH_RES_TIMERS && HW_PERF_EVENTS
+	depends on DEBUG_INFO
+	default m
+	help
+	  This is required to run on the ARM linux target in order for ARM
+	  Streamline to operate.
+
+config LEDS_RGB
+	bool "Support RGB leds"
+	default n
+	help
+	  This option enables dkb RGB leds.
+config SEC_VIBRATOR
+	bool "Support SEC Vibrator"
+	default n
+	help
+	  This option enables sec designed ldo vibrator.
+
+config SD8XXX_RFKILL
+        tristate "Rfkill power control for Marvell sd8xxx wlan/bt/fm"
+        depends on MMC_SDHCI_PXAV2 || MMC_SDHCI_PXAV3
+        select RFKILL
+        select WIRELESS_EXT
+        select WEXT_PRIV
+        select WEXT_SPY
+        default n
+        ---help---
+         Creates an rfkill entry in sysfs for power control of Marvell
+         sd8xxx wlan/bt/fm chips.
 
 source "drivers/misc/c2port/Kconfig"
 source "drivers/misc/eeprom/Kconfig"

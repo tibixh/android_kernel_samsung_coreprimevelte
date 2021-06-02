@@ -32,6 +32,18 @@ config INPUT_88PM80X_ONKEY
 	  To compile this driver as a module, choose M here: the module
 	  will be called 88pm80x_onkey.
 
+config INPUT_88PM88X_ONKEY
+	tristate "88PM88X ONKEY support"
+	depends on MFD_88PM88X
+	help
+	  Support the ONKEY of Marvell 88PM88X PMICs as an input device
+	  reporting power button status.
+
+	  Support the feature that "GPIO + LONGONKEY" resets the PMIC
+
+	  To compile this driver as a module, choose M here: the module
+	  will be called 88pm88X_onkey.
+
 config INPUT_AB8500_PONKEY
 	tristate "AB8500 Pon (PowerOn) Key"
 	depends on AB8500_CORE
@@ -308,6 +320,17 @@ config INPUT_ATI_REMOTE2
 	  To compile this driver as a module, choose M here: the module will be
 	  called ati_remote2.
 
+config INPUT_KEYCHORD
+	tristate "Key chord input driver support"
+	help
+	  Say Y here if you want to enable the key chord driver
+	  accessible at /dev/keychord.  This driver can be used
+	  for receiving notifications when client specified key
+	  combinations are pressed.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called keychord.
+
 config INPUT_KEYSPAN_REMOTE
 	tristate "Keyspan DMR USB remote control"
 	depends on USB_ARCH_HAS_HCD
@@ -442,6 +465,11 @@ config INPUT_SGI_BTNS
 
 	  To compile this driver as a module, choose M here: the
 	  module will be called sgi_btns.
+
+config INPUT_GPIO
+	tristate "GPIO driver support"
+	help
+	  Say Y here if you want to support gpio based keys, wheels etc...
 
 config HP_SDC_RTC
 	tristate "HP SDC Real Time Clock"
@@ -666,4 +694,12 @@ config INPUT_IDEAPAD_SLIDEBAR
 	  To compile this driver as a module, choose M here: the
 	  module will be called ideapad_slidebar.
 
+config INPUT_BOOSTER
+	tristate "Input booster device to support frequency min lock"
+	help
+	  Say Y here if you want to support input booster for the input device
+	  such as key, touch, pen, touchkey.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called input_booster.
 endif

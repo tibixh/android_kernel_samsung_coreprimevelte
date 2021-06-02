@@ -96,9 +96,19 @@ struct usb_phy {
 	/* to support controllers that have multiple transceivers */
 	struct list_head	head;
 
+	/*
+	 * PHY may be shared by multiple devices.
+	 * Being protected by phy_refcount, PHY is initialized
+	 * or shut down only once.
+	 */
+	unsigned int            refcount;
+
 	/* initialize/shutdown the OTG controller */
 	int	(*init)(struct usb_phy *x);
 	void	(*shutdown)(struct usb_phy *x);
+
+	/* use USB PHY to detect charger type */
+	int	(*charger_detect)(struct usb_phy *x);
 
 	/* enable/disable VBUS */
 	int	(*set_vbus)(struct usb_phy *x, int on);
@@ -116,6 +126,9 @@ struct usb_phy {
 			enum usb_device_speed speed);
 	int	(*notify_disconnect)(struct usb_phy *x,
 			enum usb_device_speed speed);
+#ifdef CONFIG_USB_PHY_TUNE
+	int (*tune)(struct usb_phy *x, bool phy_state);
+#endif
 };
 
 /**
@@ -159,16 +172,29 @@ static inline int usb_phy_io_write(struct usb_phy *x, u32 val, u32 reg)
 static inline int
 usb_phy_init(struct usb_phy *x)
 {
-	if (x && x->init)
-		return x->init(x);
+	int ret = 0;
 
-	return 0;
+	if (x && x->refcount++ == 0 && x->init)
+		ret = x->init(x);
+
+	return ret;
+}
+
+static inline int
+usb_phy_charger_detect(struct usb_phy *x)
+{
+	int ret = 0;
+
+	if (x->charger_detect)
+		ret = x->charger_detect(x);
+
+	return ret;
 }
 
 static inline void
 usb_phy_shutdown(struct usb_phy *x)
 {
-	if (x && x->shutdown)
+	if (x && --x->refcount == 0 && x->shutdown)
 		x->shutdown(x);
 }
 
@@ -189,7 +215,16 @@ usb_phy_vbus_off(struct usb_phy *x)
 
 	return x->set_vbus(x, false);
 }
-
+#ifdef CONFIG_USB_PHY_TUNE
+static inline int
+usb_phy_tune(struct usb_phy *x, bool val)
+{
+	int ret = 0;
+	 if (x)
+		 ret = x->tune(x, val);
+	 return ret;
+}
+#endif
 /* for usb host and peripheral controller drivers */
 #if IS_ENABLED(CONFIG_USB_PHY)
 extern struct usb_phy *usb_get_phy(enum usb_phy_type type);

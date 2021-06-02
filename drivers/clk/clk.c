@@ -20,6 +20,7 @@
 #include <linux/device.h>
 #include <linux/init.h>
 #include <linux/sched.h>
+#include <linux/uaccess.h>
 
 #include "clk.h"
 
@@ -35,6 +36,22 @@ static int enable_refcnt;
 static HLIST_HEAD(clk_root_list);
 static HLIST_HEAD(clk_orphan_list);
 static LIST_HEAD(clk_notifier_list);
+
+static int __clk_notify(struct clk *clk, unsigned long msg,
+	unsigned long old_rate, unsigned long new_rate);
+
+
+static int disable_freqchg;
+
+static int __init disable_freqchg_setup(char *str)
+{
+	int n;
+	if (!get_option(&str, &n))
+		return 0;
+	disable_freqchg = n;
+	return 1;
+}
+__setup("disable_freqchg=", disable_freqchg_setup);
 
 /***           locking             ***/
 static void clk_prepare_lock(void)
@@ -230,6 +247,109 @@ static const struct file_operations clk_dump_fops = {
 	.release	= single_release,
 };
 
+static ssize_t
+clk_getrate_read(struct file *filp, char __user *ubuf, size_t cnt,
+		loff_t *ppos)
+{
+	struct clk *clk = filp->private_data;
+	char buf[12];
+	int ret, len = 0;
+
+	len = snprintf(buf, sizeof(buf), "%10lu\n", clk_get_rate(clk));
+
+	ret = simple_read_from_buffer(ubuf, cnt, ppos, buf, len);
+	return ret;
+}
+
+static ssize_t
+clk_setrate_write(struct file *filp, const char __user *ubuf, size_t cnt,
+		 loff_t *ppos)
+{
+	struct clk *clk = filp->private_data;
+	char buf[64];
+	unsigned long rate;
+	int ret;
+
+	if (cnt >= sizeof(buf))
+		return -EINVAL;
+
+	if (copy_from_user(&buf, ubuf, cnt))
+		return -EFAULT;
+
+	buf[cnt] = 0;
+
+	ret = kstrtoul(buf, 10, &rate);
+	if (ret < 0)
+		return ret;
+
+	*ppos += cnt;
+	clk_set_rate(clk, rate);
+
+	return cnt;
+}
+
+
+static const struct file_operations clk_rate_fops = {
+	.open = simple_open,
+	.read = clk_getrate_read,
+	.write = clk_setrate_write,
+};
+
+static ssize_t
+clk_enable_read(struct file *filp, char __user *ubuf, size_t cnt,
+		loff_t *ppos)
+{
+	char buf[5];
+	int ret;
+	struct clk *clk = filp->private_data;
+
+	sprintf(buf, "%4x", __clk_is_enabled(clk));
+	buf[4] = '\n';
+
+	ret = simple_read_from_buffer(ubuf, cnt, ppos, buf, 5);
+
+	return ret;
+}
+
+static ssize_t
+clk_enable_write(struct file *filp, const char __user *ubuf, size_t cnt,
+		 loff_t *ppos)
+{
+	struct clk *clk = filp->private_data;
+	char buf[64];
+	int ret;
+	unsigned long enable_val;
+
+	if (cnt >= sizeof(buf))
+		return -EINVAL;
+
+	if (copy_from_user(&buf, ubuf, cnt))
+		return -EFAULT;
+
+	buf[cnt] = 0;
+
+	ret = kstrtoul(buf, 10, &enable_val);
+	if (ret < 0)
+		return ret;
+
+	if (enable_val != 0 && enable_val != 1)
+		return -EINVAL;
+
+	*ppos += cnt;
+	if (enable_val)
+		clk_prepare_enable(clk);
+	else
+		clk_disable_unprepare(clk);
+
+	return cnt;
+}
+
+static const struct file_operations clk_enable_fops = {
+	.open = simple_open,
+	.read = clk_enable_read,
+	.write = clk_enable_write,
+};
+
 /* caller must hold prepare_lock */
 static int clk_debug_create_one(struct clk *clk, struct dentry *pdentry)
 {
@@ -246,14 +366,23 @@ static int clk_debug_create_one(struct clk *clk, struct dentry *pdentry)
 		goto out;
 
 	clk->dentry = d;
-
-	d = debugfs_create_u32("clk_rate", S_IRUGO, clk->dentry,
-			(u32 *)&clk->rate);
+	if (clk->ops->set_rate || (clk->flags & CLK_SET_RATE_PARENT))
+		d = debugfs_create_file("clk_rate", 0644, clk->dentry,
+				(void *)clk, &clk_rate_fops);
+	else
+		d = debugfs_create_u32("clk_rate", S_IRUGO, clk->dentry,
+				(u32 *)&clk->rate);
 	if (!d)
 		goto err_out;
 
 	d = debugfs_create_u32("clk_accuracy", S_IRUGO, clk->dentry,
 			(u32 *)&clk->accuracy);
+	if (!d)
+		goto err_out;
+
+	if (clk->ops->enable && clk->ops->disable)
+		d = debugfs_create_file("enable", 0644, clk->dentry,
+				(void *)clk, &clk_enable_fops);
 	if (!d)
 		goto err_out;
 
@@ -733,6 +862,7 @@ struct clk *__clk_lookup(const char *name)
 
 	return NULL;
 }
+EXPORT_SYMBOL(__clk_lookup);
 
 /*
  * Helper for finding best parent to provide a given frequency. This can be used
@@ -803,6 +933,10 @@ void __clk_unprepare(struct clk *clk)
 		clk->ops->unprepare(clk->hw);
 
 	__clk_unprepare(clk->parent);
+
+	/* send out notifier for dvfs */
+	if (clk->notifier_count)
+		__clk_notify(clk, POST_RATE_CHANGE, clk->rate, 0);
 }
 
 /**
@@ -843,6 +977,9 @@ int __clk_prepare(struct clk *clk)
 				return ret;
 			}
 		}
+		/* send out notifier for dvfs */
+		if (clk->notifier_count)
+			__clk_notify(clk, PRE_RATE_CHANGE, 0, clk->rate);
 	}
 
 	clk->prepare_count++;
@@ -1247,12 +1384,20 @@ static struct clk *__clk_set_parent_before(struct clk *clk, struct clk *parent)
 	 *
 	 * See also: Comment for clk_set_parent() below.
 	 */
-	if (clk->prepare_count) {
-		__clk_prepare(parent);
-		clk_enable(parent);
-		clk_enable(clk);
+	if (likely(!(clk->flags & CLK_SET_RATE_PARENTS_ENABLED))) {
+		if (clk->prepare_count) {
+			__clk_prepare(parent);
+			clk_enable(parent);
+			clk_enable(clk);
+		}
+	} else {
+		if (parent)
+			clk_prepare_enable(parent);
+		if (clk->prepare_count)
+			clk_enable(clk);
+		else if (old_parent)
+			clk_prepare_enable(old_parent);
 	}
-
 	/* update the clk tree topology */
 	flags = clk_enable_lock();
 	clk_reparent(clk, parent);
@@ -1268,12 +1413,20 @@ static void __clk_set_parent_after(struct clk *clk, struct clk *parent,
 	 * Finish the migration of prepare state and undo the changes done
 	 * for preventing a race with clk_enable().
 	 */
-	if (clk->prepare_count) {
-		clk_disable(clk);
-		clk_disable(old_parent);
-		__clk_unprepare(old_parent);
+	if (likely(!(clk->flags & CLK_SET_RATE_PARENTS_ENABLED))) {
+		if (clk->prepare_count) {
+			clk_disable(clk);
+			clk_disable(old_parent);
+			__clk_unprepare(old_parent);
+		}
+	} else {
+		if (clk->prepare_count)
+			clk_disable(clk);
+		else if (parent)
+			clk_disable_unprepare(parent);
+		if (old_parent)
+			clk_disable_unprepare(old_parent);
 	}
-
 	/* update debugfs with new clk tree topology */
 	clk_debug_reparent(clk, parent);
 }
@@ -1567,8 +1720,12 @@ int clk_set_rate(struct clk *clk, unsigned long rate)
 {
 	struct clk *top, *fail_clk;
 	int ret = 0;
+	unsigned int clk_need_enable = 0;
 
 	if (!clk)
+		return 0;
+
+	if (unlikely(disable_freqchg))
 		return 0;
 
 	/* prevent racing with updates to the clock topology */
@@ -1578,7 +1735,13 @@ int clk_set_rate(struct clk *clk, unsigned long rate)
 	if (rate == clk_get_rate(clk))
 		goto out;
 
-	if ((clk->flags & CLK_SET_RATE_GATE) && clk->prepare_count) {
+	/*
+	 * sometimes clock is enabled by bootloader instead of kernel,
+	 * so here we check two conditions for clock enable status, one
+	 * is prepare count, the other is enable count/real clcok status
+	 */
+	if ((clk->flags & CLK_SET_RATE_GATE) &&
+		(clk->prepare_count || __clk_is_enabled(clk))) {
 		ret = -EBUSY;
 		goto out;
 	}
@@ -1590,6 +1753,12 @@ int clk_set_rate(struct clk *clk, unsigned long rate)
 		goto out;
 	}
 
+	/* For clock which need enable clock to successful set rate */
+	if ((clk->flags & CLK_SET_RATE_ENABLED) && (!__clk_is_enabled(clk))) {
+		clk_prepare_enable(clk);
+		clk_need_enable = 1;
+	}
+
 	/* notify that we are about to change rates */
 	fail_clk = clk_propagate_rate_change(top, PRE_RATE_CHANGE);
 	if (fail_clk) {
@@ -1597,11 +1766,15 @@ int clk_set_rate(struct clk *clk, unsigned long rate)
 				fail_clk->name);
 		clk_propagate_rate_change(top, ABORT_RATE_CHANGE);
 		ret = -EBUSY;
-		goto out;
+		goto out1;
 	}
 
 	/* change the rates */
 	clk_change_rate(top);
+
+out1:
+	if (clk_need_enable)
+		clk_disable_unprepare(clk);
 
 out:
 	clk_prepare_unlock();

@@ -278,6 +278,18 @@ config TOUCHSCREEN_FUJITSU
 	  To compile this driver as a module, choose M here: the
 	  module will be called fujitsu-ts.
 
+config TOUCHSCREEN_GT9XX
+	tristate "GT9XX Touchscreen interface support"
+	depends on I2C
+	help
+	  Say Y here if enable support for the Goodix GT9XX multi fingers
+	  touchscreen controller.
+
+	  If unsure, say N.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called gt9xx_touch.
+
 config TOUCHSCREEN_ILI210X
 	tristate "Ilitek ILI210X based touchscreen"
 	depends on I2C
@@ -599,6 +611,17 @@ config TOUCHSCREEN_PIXCIR
 	  To compile this driver as a module, choose M here: the
 	  module will be called pixcir_i2c_ts.
 
+config TOUCHSCREEN_VNC
+	tristate "VNC based touchscreen"
+	depends on FB
+	help
+	  Say Y here to enable support for VNC virtual touch screen driver
+
+	  If unsure, say N.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called vnc_touch.
+
 config TOUCHSCREEN_WM831X
 	tristate "Support for WM831x touchscreen controllers"
 	depends on MFD_WM831X
@@ -906,6 +929,57 @@ config TOUCHSCREEN_STMPE
 	  To compile this driver as a module, choose M here: the
 	  module will be called stmpe-ts.
 
+config TOUCHSCREEN_SYNAPTICS_DSX_I2C
+        tristate "Synaptics DSX I2C touchscreen"
+        depends on I2C
+        help
+          Say Y here if you have a Synaptics DSX I2C touchscreen
+          connected to your system. If unsure, say N.
+
+          To compile this driver as a module, choose M here: the
+          module will be called synaptics_dsx_i2c.
+
+config TOUCHSCREEN_88MS100
+	tristate "Marvell 88MS100 touchscreen"
+	depends on I2C
+	help
+	  Say Y here if you have a 88MS100 PMIC and want to enable
+	  support for the built-in touchscreen.
+
+	  If unsure, say N.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called 88ms100_touch.
+
+config TOUCHSCREEN_MSG2133
+	tristate "MSG2133 touchscreen driver"
+	depends on I2C
+	help
+	  Say Y here if enable support for the MSG2133 touchscreen controller.
+
+config TOUCHSCREEN_MSG2138
+	tristate "MSG2138 touchscreen driver"
+	depends on I2C
+	help
+	  Say Y here if enable support for the MSG2138 touchscreen
+	  controller.
+
+	  If unsure, say N.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called msg2138.
+
+config TOUCHSCREEN_FT6206
+	tristate "FT6206 touchscreen driver"
+	depends on I2C
+	help
+	  Say Y here if enable support for the FT6206 touchscreen controller.
+
+	  If unsure, say N.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called ft6206_ts.
+
 config TOUCHSCREEN_SUR40
 	tristate "Samsung SUR40 (Surface 2.0/PixelSense) touchscreen"
 	depends on USB
@@ -942,5 +1016,39 @@ config TOUCHSCREEN_ZFORCE
 
 	  To compile this driver as a module, choose M here: the
 	  module will be called zforce_ts.
+
+config TOUCHSCREEN_IST3038
+	tristate "IMAGIS IST3038 touchscreens"
+	depends on I2C
+	help
+		Say Y here if you have a touchscreen using the ist3038.
+
+		If unsure, say N.
+
+		To compile this driver as a module, choose M here: the
+		module will be called its3038.
+
+config TOUCHSCREEN_IST30XXC
+	tristate "Imagis IST30XXC series touchscreen"
+	depends on I2C
+	help
+		Say Y here if you have a touchscreen using the IST30XXC series.
+
+		If unsure, say N.
+
+		To compile this driver as a module, choose M here: the
+		module will be called ist30xxc.
+
+
+config TOUCHSCREEN_BT541
+	tristate "Zinitix BT541C touchscreen"
+	depends on I2C
+	help
+		Say Y here if you have a touchscreen using the BT541.
+
+		If unsure, say N.
+
+		To compile this driver as a module, choose M here: the
+		module will be called bt541_ts.
 
 endif

@@ -1026,6 +1026,10 @@ config SENSORS_PCF8591
 	  hardware.  If unsure, say N.
 
 source drivers/hwmon/pmbus/Kconfig
+source drivers/hwmon/bmi160/Kconfig
+source drivers/hwmon/bme280/Kconfig
+source drivers/hwmon/bmp280/Kconfig
+source drivers/hwmon/sec/Kconfig
 
 config SENSORS_SHT15
 	tristate "Sensiron humidity and temperature sensors. SHT15 and compat."
@@ -1508,6 +1512,16 @@ config SENSORS_WM831X
 	  This driver can also be built as a module.  If so, the module
 	  will be called wm831x-hwmon.
 
+config SENSORS_ISL29043
+	tristate "ISL29043 light and proximity sensor"
+	depends on I2C && INPUT
+	help
+	  If you say yes here you get support for the hardware
+	  monitoring functionality of the Intersil sensor chip.
+
+	  This driver provides support for ISL29043, which include light
+	  sensor and proximity sensor.
+
 config SENSORS_WM8350
 	tristate "Wolfson Microelectronics WM835x"
 	depends on MFD_WM8350
@@ -1517,6 +1531,13 @@ config SENSORS_WM8350
 
 	  This driver can also be built as a module.  If so, the module
 	  will be called wm8350-hwmon.
+
+config SENSORS_MMX3524X_MXC400X
+	tristate "Memsic MMX3524X mag sensor and MXC400X accel sensor"
+	depends on I2C && INPUT
+	help
+	This driver provides the support of MMX3524X and MXC400X deivce.If
+	you say yes here, you will get this support both MMX3524X and MXC400X.
 
 config SENSORS_ULTRA45
 	tristate "Sun Ultra45 PIC16F747"
@@ -1556,6 +1577,111 @@ config SENSORS_MC13783_ADC
         help
           Support for the A/D converter on MC13783 and MC13892 PMIC.
 
+config SENSORS_LPS331AP
+       tristate "STMicroelectronics LPS331AP Barometer Sensor"
+       depends on I2C && INPUT
+       help
+         If you say yes here you get support for the hardware
+         monitoring functionality of the LPS331AP Barometer sensor.
+         This driver support STMicroelectronics LPS331AP Barometer
+
+config SENSORS_BMP18X
+        tristate "BMP18X digital pressure sensor"
+	depends on (I2C || SPI_MASTER) && SYSFS
+	help
+	If you say yes here you get support for Bosch Sensortec
+	digital pressure sensors BMP085, BMP180 and BMP181.
+	To compile this driver as a module, choose M here:
+	the module will be called bmp18x-core.
+
+config SENSORS_APDS9930
+	tristate "APDS9930 light and proximity sensor"
+	depends on I2C && INPUT
+	help
+	  This driver provides support the APDS990x deivce.
+
+config SENSORS_APDS990X_MRVL
+       tristate "APDS990x_MRVL light and proximity sensor"
+       depends on I2C && INPUT
+       help
+       This driver provides support the APDS990x deivce
+         sensor.Read pressures and temperatures output.
+
+config SENSORS_GRIP
+	bool "grip(sar) sensor support"
+	default n
+	help
+	  Say Y here if you want to enable sar sensor.
+	  Say N to disable.
+	  SAR or grip sensor work as an input device in this driver,
+	  like a gpio input device.
+
+config SENSORS_STK3X1X
+	bool "SensorTek stk3x1x"
+	depends on I2C
+	default n
+	help
+	Say Y here if you have a stk3x1x sensor.
+	If unsure, say N.
+
+	Stk3x1x is a light and proximity sensor.
+	Config dts is also needed.
+
+config SENSORS_LIS3DH
+	tristate "ST lid3dh 3-Axid accelerometer device with I2C bus"
+	depends on I2C
+	default n
+	help
+	  Say Y here if you have a lis3dh device on the board and use I2C
+	  communication, else say N.
+
+	  If unsure, say N.
+
+	  To compile this driver as a module, choose M here.
+
+config SENSORS_TSL2772
+	tristate "TAOS TSL2772 proximity and ambient light sensor"
+	depends on I2C
+	default n
+	help
+	  If you say yes here you get support for the TAOS tsl2772,
+	  proximity and ambient light sensors.
+
+	  If unsure, say N.
+
+	  This driver can also be built as a module.  If so, the module
+	  will be called tsl277x.
+
+config SENSORS_MC3XXX
+	tristate "mCube mc3xxx 3-Axis accelerometer device with I2C bus"
+	depends on I2C
+	default n
+	help
+	  Say Y here if you have a mc3xxx device on the board and use I2C
+	  communication, else say N.
+
+	  If unsure, say N.
+
+	  To compile this driver as a module, choose M here.
+
+config SENSORS_LTR558_I2C
+	tristate "LTR 558 proximity device with I2C bus"
+	depends on I2C
+	default n
+	help
+	  Say Y here if you have a ltr558 and ltr553  device on the board and use I2C
+	  communication, else say N.
+
+config SENSOR_EPL2182
+	tristate "EPL 2182 proximity and ambient light sensor"
+	depends on I2C
+	default n
+	help
+	  Say Y here if you have a epl2182 device on the board and use I2C
+	  communication, else say N.
+
+	  To compile this driver as a module, choose M here.
+
 if ACPI
 
 comment "ACPI drivers"
@@ -1584,4 +1710,14 @@ config SENSORS_ATK0110
 
 endif # ACPI
 
+
+config SENSORS_SEC_THERMISTOR
+	tristate "SEC Thermistor support"
+	default y
+	help
+	  This driver supports SEC Thermistor sensor reading and its
+	  interpretation. The driver uses s3c adc driver and needs
+	  adc-temperature
+
 endif # HWMON
+

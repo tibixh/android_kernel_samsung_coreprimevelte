@@ -4,14 +4,23 @@ snd-soc-pxa2xx-ac97-objs := pxa2xx-ac97.o
 snd-soc-pxa2xx-i2s-objs := pxa2xx-i2s.o
 snd-soc-pxa-ssp-objs := pxa-ssp.o
 snd-soc-mmp-objs := mmp-pcm.o
+snd-soc-mmp-pcm-hostless-objs := mmp-pcm-hostless.o
+snd-soc-pxa-objs := pxa-pcm.o
 snd-soc-mmp-sspa-objs := mmp-sspa.o
+snd-soc-mmp-map-be-dai-objs := mmp-map-be-dai.o
+snd-soc-mmp-tdm-objs := mmp-tdm.o
+snd-soc-pxa-objs := pxa-pcm.o
 
 obj-$(CONFIG_SND_PXA2XX_SOC) += snd-soc-pxa2xx.o
 obj-$(CONFIG_SND_PXA2XX_SOC_AC97) += snd-soc-pxa2xx-ac97.o
 obj-$(CONFIG_SND_PXA2XX_SOC_I2S) += snd-soc-pxa2xx-i2s.o
 obj-$(CONFIG_SND_PXA_SOC_SSP) += snd-soc-pxa-ssp.o
 obj-$(CONFIG_SND_MMP_SOC) += snd-soc-mmp.o
+obj-$(CONFIG_SND_MMP_PCM_HOSTLESS) += snd-soc-mmp-pcm-hostless.o
 obj-$(CONFIG_SND_MMP_SOC_SSPA) += snd-soc-mmp-sspa.o
+obj-$(CONFIG_SND_PXA_SOC) += snd-soc-pxa.o
+obj-$(CONFIG_SND_MMP_MAP_BE_DAI) += snd-soc-mmp-map-be-dai.o
+obj-$(CONFIG_SND_MMP_TDM) += snd-soc-mmp-tdm.o
 
 # PXA Machine Support
 snd-soc-corgi-objs := corgi.o
@@ -32,6 +41,8 @@ snd-soc-imote2-objs := imote2.o
 snd-soc-raumfeld-objs := raumfeld.o
 snd-soc-brownstone-objs := brownstone.o
 snd-soc-ttc-dkb-objs := ttc-dkb.o
+snd-soc-mmp-map-objs := mmp-map-card.o
+snd-soc-pxa-88pm805-objs := pxa-88pm805.o
 
 obj-$(CONFIG_SND_PXA2XX_SOC_CORGI) += snd-soc-corgi.o
 obj-$(CONFIG_SND_PXA2XX_SOC_POODLE) += snd-soc-poodle.o
@@ -51,3 +62,5 @@ obj-$(CONFIG_SND_PXA2XX_SOC_IMOTE2) += snd-soc-imote2.o
 obj-$(CONFIG_SND_SOC_RAUMFELD) += snd-soc-raumfeld.o
 obj-$(CONFIG_SND_MMP_SOC_BROWNSTONE) += snd-soc-brownstone.o
 obj-$(CONFIG_SND_SOC_TTC_DKB) += snd-soc-ttc-dkb.o
+obj-$(CONFIG_SND_MMP_MAP) += snd-soc-mmp-map.o
+obj-$(CONFIG_SND_SOC_PXA_88PM805) += snd-soc-pxa-88pm805.o

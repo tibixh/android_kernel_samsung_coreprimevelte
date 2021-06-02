@@ -57,6 +57,8 @@
 #define DEFAULT_THERMAL_GOVERNOR       "fair_share"
 #elif defined(CONFIG_THERMAL_DEFAULT_GOV_USER_SPACE)
 #define DEFAULT_THERMAL_GOVERNOR       "user_space"
+#elif defined(CONFIG_THERMAL_DEFAULT_GOV_BI_DIRECTION)
+#define DEFAULT_THERMAL_GOVERNOR       "bi_direction"
 #endif
 
 struct thermal_zone_device;
@@ -111,7 +113,7 @@ struct thermal_zone_device_ops {
 		     struct thermal_cooling_device *);
 	int (*unbind) (struct thermal_zone_device *,
 		       struct thermal_cooling_device *);
-	int (*get_temp) (struct thermal_zone_device *, unsigned long *);
+	int (*get_temp)(struct thermal_zone_device *, int *);
 	int (*get_mode) (struct thermal_zone_device *,
 			 enum thermal_device_mode *);
 	int (*set_mode) (struct thermal_zone_device *,
@@ -119,15 +121,15 @@ struct thermal_zone_device_ops {
 	int (*get_trip_type) (struct thermal_zone_device *, int,
 		enum thermal_trip_type *);
 	int (*get_trip_temp) (struct thermal_zone_device *, int,
-			      unsigned long *);
+			      int *);
 	int (*set_trip_temp) (struct thermal_zone_device *, int,
-			      unsigned long);
+			      int);
 	int (*get_trip_hyst) (struct thermal_zone_device *, int,
-			      unsigned long *);
+			      int *);
 	int (*set_trip_hyst) (struct thermal_zone_device *, int,
-			      unsigned long);
-	int (*get_crit_temp) (struct thermal_zone_device *, unsigned long *);
-	int (*set_emul_temp) (struct thermal_zone_device *, unsigned long);
+			      int);
+	int (*get_crit_temp)(struct thermal_zone_device *, int *);
+	int (*set_emul_temp)(struct thermal_zone_device *, int);
 	int (*get_trend) (struct thermal_zone_device *, int,
 			  enum thermal_trend *);
 	int (*notify) (struct thermal_zone_device *, int,
@@ -158,6 +160,10 @@ struct thermal_attr {
 	char name[THERMAL_NAME_LENGTH];
 };
 
+struct tz_bidirection_ctrl {
+	bool state_ctrl;
+};
+
 struct thermal_zone_device {
 	int id;
 	char type[THERMAL_NAME_LENGTH];
@@ -176,6 +182,7 @@ struct thermal_zone_device {
 	unsigned int forced_passive;
 	struct thermal_zone_device_ops *ops;
 	const struct thermal_zone_params *tzp;
+	struct tz_bidirection_ctrl tzdctrl;
 	struct thermal_governor *governor;
 	struct list_head thermal_instances;
 	struct idr idr;
@@ -188,6 +195,9 @@ struct thermal_zone_device {
 struct thermal_governor {
 	char name[THERMAL_NAME_LENGTH];
 	int (*throttle)(struct thermal_zone_device *tz, int trip);
+	int (*switch_gov)(struct thermal_zone_device *tz,
+			struct thermal_governor *from,
+			struct thermal_governor *to);
 	struct list_head	governor_list;
 };
 
@@ -247,14 +257,14 @@ struct thermal_genl_event {
 #ifdef CONFIG_THERMAL_OF
 struct thermal_zone_device *
 thermal_zone_of_sensor_register(struct device *dev, int id,
-				void *data, int (*get_temp)(void *, long *),
+				void *data, int (*get_temp)(void *, int *),
 				int (*get_trend)(void *, long *));
 void thermal_zone_of_sensor_unregister(struct device *dev,
 				       struct thermal_zone_device *tz);
 #else
 static inline struct thermal_zone_device *
 thermal_zone_of_sensor_register(struct device *dev, int id,
-				void *data, int (*get_temp)(void *, long *),
+				void *data, int (*get_temp)(void *, int *),
 				int (*get_trend)(void *, long *))
 {
 	return NULL;
@@ -286,7 +296,7 @@ thermal_of_cooling_device_register(struct device_node *np, char *, void *,
 				   const struct thermal_cooling_device_ops *);
 void thermal_cooling_device_unregister(struct thermal_cooling_device *);
 struct thermal_zone_device *thermal_zone_get_zone_by_name(const char *name);
-int thermal_zone_get_temp(struct thermal_zone_device *tz, unsigned long *temp);
+int thermal_zone_get_temp(struct thermal_zone_device *tz, int *temp);
 
 int get_tz_trend(struct thermal_zone_device *, int);
 struct thermal_instance *get_thermal_instance(struct thermal_zone_device *,

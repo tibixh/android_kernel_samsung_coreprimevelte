@@ -23,6 +23,10 @@
 #include <linux/pxa2xx_ssp.h>
 #include <linux/of.h>
 #include <linux/dmaengine.h>
+#include <linux/delay.h>
+#include <linux/platform_data/mmp_audio.h>
+#include <linux/pinctrl/consumer.h>
+#include <linux/of_gpio.h>
 
 #include <asm/irq.h>
 
@@ -46,13 +50,95 @@ struct ssp_priv {
 	struct ssp_device *ssp;
 	unsigned int sysclk;
 	int dai_fmt;
+	unsigned int burst_size;
+	struct pinctrl *pinctrl;
+	struct pinctrl_state *pin_ssp;
+	struct pinctrl_state *pin_gpio;
+	int mfp;
+	int usr_cnt;
+	bool mfp_init;
 #ifdef CONFIG_PM
 	uint32_t	cr0;
 	uint32_t	cr1;
 	uint32_t	to;
 	uint32_t	psp;
 #endif
+	/*
+	 * FixMe: for port 5 (gssp), it is shared by ap
+	 * and cp. When AP want to handle it, AP need to
+	 * configure APB to connect gssp. Also reset gssp
+	 * clk to clear the potential impact from cp
+	 */
+	void __iomem	*apbcp_base;
 };
+
+static ssize_t ssp_mfp_show(struct device *dev,
+				struct device_attribute *attr, char *buf)
+{
+	struct ssp_priv *priv = dev_get_drvdata(dev);
+	if (!priv)
+		return sprintf(buf, "%s\n", "get ssp-priv failed!!!\n");
+
+	if (priv->ssp->port_id == 2)
+		pr_debug("i2s pin mfp setting:\n");
+	else if (priv->ssp->port_id == 5)
+		pr_debug("gssp pin mfp setting:\n");
+
+	return sprintf(buf, "%s\n", (priv->mfp ? "ssp" : "gpio"));
+}
+
+static ssize_t ssp_mfp_set(struct device *dev,
+			       struct device_attribute *attr,
+			       const char *buf, size_t count)
+{
+	int ret, i;
+	u32 pins_ssp;
+	struct ssp_priv *priv = dev_get_drvdata(dev);
+	struct device_node *np = dev->of_node;
+
+	if (!priv)
+		return -EINVAL;
+
+	if (IS_ERR(priv->pin_ssp) || IS_ERR(priv->pin_gpio))
+		return -EINVAL;
+
+	ret = kstrtoint(buf, 10, &priv->mfp);
+	if (ret)
+		return ret;
+
+	/* mfp = 0, set to gpio; mfp = 1, set to ssp */
+	if (priv->mfp) {
+		ret = pinctrl_select_state(priv->pinctrl, priv->pin_ssp);
+		if (ret) {
+			dev_err(dev, "could not set ssp pins\n");
+			goto err_out;
+		}
+	} else {
+		ret = pinctrl_select_state(priv->pinctrl, priv->pin_gpio);
+		if (ret) {
+			dev_err(dev, "could not set default(gpio) pins\n");
+			goto err_out;
+		}
+
+		for (i = 0; i < 4; i++) {
+			pins_ssp = of_get_named_gpio(np, "ssp-gpio", i);
+			gpio_request(pins_ssp, NULL);
+			gpio_direction_input(pins_ssp);
+			gpio_free(pins_ssp);
+		}
+	}
+
+	if (priv->ssp->port_id == 2)
+		pr_debug("i2s pin set to %s\n", (priv->mfp ? "ssp" : "gpio"));
+	else if (priv->ssp->port_id == 5)
+		pr_debug("gssp pin set to %s\n", (priv->mfp ? "ssp" : "gpio"));
+
+err_out:
+	return count;
+}
+
+static DEVICE_ATTR(gssp_mfp, 0644, ssp_mfp_show, ssp_mfp_set);
+static DEVICE_ATTR(ssp_mfp, 0644, ssp_mfp_show, ssp_mfp_set);
 
 static void dump_registers(struct ssp_device *ssp)
 {
@@ -86,7 +172,10 @@ static void pxa_ssp_set_dma_params(struct ssp_device *ssp, int width4,
 {
 	dma->addr_width = width4 ? DMA_SLAVE_BUSWIDTH_4_BYTES :
 				   DMA_SLAVE_BUSWIDTH_2_BYTES;
-	dma->maxburst = 16;
+
+	if (dma->maxburst > PXA_SSP_FIFO_DEPTH)
+		dma->maxburst = PXA_SSP_FIFO_DEPTH;
+
 	dma->addr = ssp->phys_base + SSDR;
 }
 
@@ -96,11 +185,86 @@ static int pxa_ssp_startup(struct snd_pcm_substream *substream,
 	struct ssp_priv *priv = snd_soc_dai_get_drvdata(cpu_dai);
 	struct ssp_device *ssp = priv->ssp;
 	struct snd_dmaengine_dai_dma_data *dma;
+	unsigned int gcer;
 	int ret = 0;
 
+	/*
+	 * when audio stream start, set ssp1 to ssp mfp.
+	 * always config gssp pins mfpr incase CP modify
+	 */
+	if ((ssp->port_id == 5) || !priv->mfp_init) {
+		ret = pinctrl_select_state(priv->pinctrl, priv->pin_ssp);
+		if (ret) {
+			dev_err(cpu_dai->dev, "could not set ssp pins\n");
+			return ret;
+		}
+		priv->mfp_init = true;
+		priv->mfp = 1;
+	}
+
 	if (!cpu_dai->active) {
-		clk_enable(ssp->clk);
-		pxa_ssp_disable(ssp);
+		/*
+		 * FIXME: for port 5 (gssp), it is shared by ap
+		 * and cp. When AP want to handle it, AP need to
+		 * configure APB to connect gssp. Also reset gssp
+		 * clk to clear the potential impact from cp
+		 */
+		if (ssp->port_id == 5) {
+			/* GPB bus select: choose APB */
+			__raw_writel(GSSP_BUS_APB_SEL, (priv->apbcp_base + APBC_GBS));
+			/* GSSP clock control register: GCER */
+			gcer = __raw_readl(priv->apbcp_base + APBC_GCER);
+			gcer &= ~(GSSP_CLK_SEL_MASK << GSSP_CLK_SEL_OFF);
+			gcer |= GSSP_RST;
+			__raw_writel(gcer, (priv->apbcp_base + APBC_GCER));
+			usleep_range(1, 2);
+			gcer &= ~GSSP_RST;
+			__raw_writel(gcer, (priv->apbcp_base + APBC_GCER));
+			usleep_range(1, 2);
+		}
+
+		clk_prepare_enable(ssp->clk);
+		/*
+		 * Since gssp is used for hifi record, enable
+		 * gssp port when startup to eliminate noise.
+		 */
+		if (ssp->port_id == 5) {
+			/*
+			 * gssp(ssp-dai.4) is shared by AP and CP.AP would read
+			 * the gssp register configured by CP after voice call.
+			 * it would impact DMA configuration. AP and CP use
+			 * different GSSP configuration, and CP's configuration
+			 * would set DMA to 16bit width while AP set it to 32
+			 * bit. so we need to re-init GSSP register setting.
+			 */
+			__raw_writel(0x0, ssp->mmio_base + SSCR0);
+			__raw_writel(0x0, ssp->mmio_base + SSCR1);
+			__raw_writel(0x0, ssp->mmio_base + SSPSP);
+			__raw_writel(0x0, ssp->mmio_base + SSTSA);
+			/*
+			 * Before enable gssp port, need to set frame format
+			 * and data size for PCM format, otherwise there
+			 * will be no frame clock.
+			 * Also need set bit23: Receive Without Transmit of
+			 * sscr1, or can't record.
+			 */
+			__raw_writel(0x0010001F, ssp->mmio_base + SSCR0);
+			__raw_writel(0x00800000, ssp->mmio_base + SSCR1);
+		}
+		if (ssp->port_id == 2) {
+			/*
+			 * Before enable ssp port, need to set frame format
+			 * and data size, otherwise there will be no frame
+			 * clock.
+			 * Also need set bit23: Receive Without Transmit of
+			 * sscr1, or can't record.
+			 */
+			__raw_writel(0x0010003F, ssp->mmio_base + SSCR0);
+			__raw_writel(0x00800000, ssp->mmio_base + SSCR1);
+			__raw_writel(0x02100004, ssp->mmio_base + SSPSP);
+		}
+		pxa_ssp_enable(ssp);
+		priv->usr_cnt = 0;
 	}
 
 	dma = kzalloc(sizeof(struct snd_dmaengine_dai_dma_data), GFP_KERNEL);
@@ -123,7 +287,18 @@ static void pxa_ssp_shutdown(struct snd_pcm_substream *substream,
 
 	if (!cpu_dai->active) {
 		pxa_ssp_disable(ssp);
-		clk_disable(ssp->clk);
+		clk_disable_unprepare(ssp->clk);
+
+		/*
+		 * FIXME: for port 5 (gssp), it is shared by ap
+		 * and cp. When AP want to handle it, AP need to
+		 * configure APB to connect gssp. Also reset gssp
+		 * clk to clear the potential impact from cp
+		 */
+		if (ssp->port_id == 5) {
+			/* GPB bus select: choose GPB */
+			__raw_writel(0, (priv->apbcp_base + APBC_GBS));
+		}
 	}
 
 	kfree(snd_soc_dai_get_dma_data(cpu_dai, substream));
@@ -134,41 +309,11 @@ static void pxa_ssp_shutdown(struct snd_pcm_substream *substream,
 
 static int pxa_ssp_suspend(struct snd_soc_dai *cpu_dai)
 {
-	struct ssp_priv *priv = snd_soc_dai_get_drvdata(cpu_dai);
-	struct ssp_device *ssp = priv->ssp;
-
-	if (!cpu_dai->active)
-		clk_enable(ssp->clk);
-
-	priv->cr0 = __raw_readl(ssp->mmio_base + SSCR0);
-	priv->cr1 = __raw_readl(ssp->mmio_base + SSCR1);
-	priv->to  = __raw_readl(ssp->mmio_base + SSTO);
-	priv->psp = __raw_readl(ssp->mmio_base + SSPSP);
-
-	pxa_ssp_disable(ssp);
-	clk_disable(ssp->clk);
 	return 0;
 }
 
 static int pxa_ssp_resume(struct snd_soc_dai *cpu_dai)
 {
-	struct ssp_priv *priv = snd_soc_dai_get_drvdata(cpu_dai);
-	struct ssp_device *ssp = priv->ssp;
-	uint32_t sssr = SSSR_ROR | SSSR_TUR | SSSR_BCE;
-
-	clk_enable(ssp->clk);
-
-	__raw_writel(sssr, ssp->mmio_base + SSSR);
-	__raw_writel(priv->cr0 & ~SSCR0_SSE, ssp->mmio_base + SSCR0);
-	__raw_writel(priv->cr1, ssp->mmio_base + SSCR1);
-	__raw_writel(priv->to,  ssp->mmio_base + SSTO);
-	__raw_writel(priv->psp, ssp->mmio_base + SSPSP);
-
-	if (cpu_dai->active)
-		pxa_ssp_enable(ssp);
-	else
-		clk_disable(ssp->clk);
-
 	return 0;
 }
 
@@ -258,11 +403,11 @@ static int pxa_ssp_set_dai_sysclk(struct snd_soc_dai *cpu_dai,
 	/* The SSP clock must be disabled when changing SSP clock mode
 	 * on PXA2xx.  On PXA3xx it must be enabled when doing so. */
 	if (ssp->type != PXA3xx_SSP)
-		clk_disable(ssp->clk);
+		clk_disable_unprepare(ssp->clk);
 	val = pxa_ssp_read_reg(ssp, SSCR0) | sscr0;
 	pxa_ssp_write_reg(ssp, SSCR0, val);
 	if (ssp->type != PXA3xx_SSP)
-		clk_enable(ssp->clk);
+		clk_prepare_enable(ssp->clk);
 
 	return 0;
 }
@@ -302,6 +447,13 @@ static int pxa_ssp_set_dai_clkdiv(struct snd_soc_dai *cpu_dai,
 		default:
 			return -EINVAL;
 		}
+		pxa_ssp_write_reg(ssp, SSACD, val);
+		break;
+	case PXA_SSP_AUDIO_DIV_ACPS:
+		val = pxa_ssp_read_reg(ssp, SSACD);
+		val &= ~0x70;
+		pxa_ssp_write_reg(ssp, SSACD, val);
+		val |= SSACD_ACPS(div);
 		pxa_ssp_write_reg(ssp, SSACD, val);
 		break;
 	case PXA_SSP_DIV_SCR:
@@ -451,7 +603,7 @@ static int pxa_ssp_set_dai_fmt(struct snd_soc_dai *cpu_dai,
 		return 0;
 
 	/* we can only change the settings if the port is not in use */
-	if (pxa_ssp_read_reg(ssp, SSCR0) & SSCR0_SSE) {
+	if (priv->usr_cnt) {
 		dev_err(&ssp->pdev->dev,
 			"can't change hardware dai format: stream is in use");
 		return -EINVAL;
@@ -552,8 +704,12 @@ static int pxa_ssp_hw_params(struct snd_pcm_substream *substream,
 	int width = snd_pcm_format_physical_width(params_format(params));
 	int ttsa = pxa_ssp_read_reg(ssp, SSTSA) & 0xf;
 	struct snd_dmaengine_dai_dma_data *dma_data;
+	u32 rate;
+	int ret;
 
 	dma_data = snd_soc_dai_get_dma_data(cpu_dai, substream);
+
+	dma_data->maxburst = priv->burst_size;
 
 	/* Network mode with one active slot (ttsa == 1) can be used
 	 * to force 16-bit frame width on the wire (for S16_LE), even
@@ -564,7 +720,7 @@ static int pxa_ssp_hw_params(struct snd_pcm_substream *substream,
 		substream->stream == SNDRV_PCM_STREAM_PLAYBACK, dma_data);
 
 	/* we can only change the settings if the port is not in use */
-	if (pxa_ssp_read_reg(ssp, SSCR0) & SSCR0_SSE)
+	if (priv->usr_cnt)
 		return 0;
 
 	/* clear selected SSP bits */
@@ -615,14 +771,35 @@ static int pxa_ssp_hw_params(struct snd_pcm_substream *substream,
 			 * after LRCLK changes polarity.
 			 */
 			sspsp |= SSPSP_SFRMWDTH(width + 1);
-			sspsp |= SSPSP_SFRMDLY((width + 1) * 2);
-			sspsp |= SSPSP_DMYSTRT(1);
+			if (ssp->type == PXA910_SSP)
+				sspsp |= SSPSP_FSRT;
+			else {
+				sspsp |= SSPSP_SFRMDLY((width + 1) * 2);
+				sspsp |= SSPSP_DMYSTRT(1);
+			}
 		}
 
 		pxa_ssp_write_reg(ssp, SSPSP, sspsp);
 		break;
 	default:
 		break;
+	}
+
+	if (ssp->port_id == 5) {
+		/*
+		 * FIXME: set clk rate to 0 incase CP modify gssp
+		 * clk cause can't set clk rate to right value.
+		 */
+		ret = clk_set_rate(ssp->clk, 0);
+		rate = params_rate(params);
+		/* Final "* 32" required by SSP hardware */
+		rate *= 32;
+		ret = clk_set_rate(ssp->clk, rate);
+		if (ret) {
+			dev_err(&ssp->pdev->dev,
+					"Can't set I2S clock rate: %d\n", ret);
+			return ret;
+		}
 	}
 
 	/* When we use a network mode, we always require TDM slots
@@ -641,14 +818,12 @@ static int pxa_ssp_hw_params(struct snd_pcm_substream *substream,
 static void pxa_ssp_set_running_bit(struct snd_pcm_substream *substream,
 				    struct ssp_device *ssp, int value)
 {
-	uint32_t sscr0 = pxa_ssp_read_reg(ssp, SSCR0);
 	uint32_t sscr1 = pxa_ssp_read_reg(ssp, SSCR1);
-	uint32_t sspsp = pxa_ssp_read_reg(ssp, SSPSP);
-	uint32_t sssr = pxa_ssp_read_reg(ssp, SSSR);
 
-	if (value && (sscr0 & SSCR0_SSE))
-		pxa_ssp_write_reg(ssp, SSCR0, sscr0 & ~SSCR0_SSE);
-
+	/*
+	 * here we only enable/disable SSP TX/RX DMA request. ssp enable/
+	 * disable is handled in startup/shutdown to avoid noise.
+	 */
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
 		if (value)
 			sscr1 |= SSCR1_TSRE;
@@ -662,12 +837,6 @@ static void pxa_ssp_set_running_bit(struct snd_pcm_substream *substream,
 	}
 
 	pxa_ssp_write_reg(ssp, SSCR1, sscr1);
-
-	if (value) {
-		pxa_ssp_write_reg(ssp, SSSR, sssr);
-		pxa_ssp_write_reg(ssp, SSPSP, sspsp);
-		pxa_ssp_write_reg(ssp, SSCR0, sscr0 | SSCR0_SSE);
-	}
 }
 
 static int pxa_ssp_trigger(struct snd_pcm_substream *substream, int cmd,
@@ -688,9 +857,11 @@ static int pxa_ssp_trigger(struct snd_pcm_substream *substream, int cmd,
 		pxa_ssp_write_reg(ssp, SSSR, val);
 		break;
 	case SNDRV_PCM_TRIGGER_START:
+		priv->usr_cnt++;
 		pxa_ssp_set_running_bit(substream, ssp, 1);
 		break;
 	case SNDRV_PCM_TRIGGER_STOP:
+		priv->usr_cnt--;
 		pxa_ssp_set_running_bit(substream, ssp, 0);
 		break;
 	case SNDRV_PCM_TRIGGER_SUSPEND:
@@ -713,6 +884,7 @@ static int pxa_ssp_probe(struct snd_soc_dai *dai)
 {
 	struct device *dev = dai->dev;
 	struct ssp_priv *priv;
+	struct mmp_audio_sspdata *pdata;
 	int ret;
 
 	priv = kzalloc(sizeof(struct ssp_priv), GFP_KERNEL);
@@ -734,17 +906,65 @@ static int pxa_ssp_probe(struct snd_soc_dai *dai)
 			ret = -ENODEV;
 			goto err_priv;
 		}
+
+		of_property_read_u32(dev->of_node, "burst_size",
+				     &priv->burst_size);
 	} else {
 		priv->ssp = pxa_ssp_request(dai->id + 1, "SoC audio");
 		if (priv->ssp == NULL) {
 			ret = -ENODEV;
 			goto err_priv;
 		}
+
+		pdata = dev_get_platdata(dai->dev);
+
+		priv->burst_size = pdata->burst_size;
+	}
+	/*
+	 * FixMe: for port 5 (gssp), it is shared by ap
+	 * and cp. When AP want to handle it, AP need to
+	 * configure APB to connect gssp. Also reset gssp
+	 * clk to clear the potential impact from cp
+	 */
+	if (priv->ssp->port_id == 5) {
+		priv->apbcp_base = devm_ioremap(dev, APBCONTROL_BASE,
+						APBCONTROL_SIZE);
+		if (priv->apbcp_base == NULL) {
+			dev_err(dev, "failed to ioremap() registers\n");
+			ret = -ENODEV;
+			goto err_priv;
+		}
+	}
+
+	priv->pinctrl = devm_pinctrl_get(dev);
+	if (IS_ERR(priv->pinctrl)) {
+		ret = PTR_ERR(priv->pinctrl);
+		goto err_priv;
+	}
+	priv->pin_ssp = pinctrl_lookup_state(priv->pinctrl, "ssp");
+	if (IS_ERR(priv->pin_ssp)) {
+		dev_err(dev, "could not get ssp pinstate\n");
+		ret = IS_ERR(priv->pin_ssp);
+		goto err_priv;
+	}
+
+	priv->pin_gpio = pinctrl_lookup_state(priv->pinctrl, "default");
+	if (IS_ERR(priv->pin_gpio)) {
+		dev_err(dev, "could not get default(gpio) pinstate\n");
+		ret = IS_ERR(priv->pin_gpio);
+		goto err_priv;
 	}
 
 	priv->dai_fmt = (unsigned int) -1;
 	snd_soc_dai_set_drvdata(dai, priv);
+	priv->usr_cnt = 0;
+	priv->mfp_init = false;
 
+	/* clear gssp init clock status */
+	if (priv->ssp->port_id == 5) {
+		clk_prepare_enable(priv->ssp->clk);
+		clk_disable_unprepare(priv->ssp->clk);
+	}
 	return 0;
 
 err_priv:
@@ -814,13 +1034,67 @@ static const struct of_device_id pxa_ssp_of_ids[] = {
 
 static int asoc_ssp_probe(struct platform_device *pdev)
 {
-	return snd_soc_register_component(&pdev->dev, &pxa_ssp_component,
+	struct device_node *np = pdev->dev.of_node;
+	char const *platform_driver_name;
+	int ret;
+
+	if (of_property_read_string(np,
+				"platform_driver_name",
+				&platform_driver_name)) {
+		dev_err(&pdev->dev,
+			"Missing platform_driver_name property in the DT\n");
+		return -EINVAL;
+	}
+
+	ret = snd_soc_register_component(&pdev->dev, &pxa_ssp_component,
 					  &pxa_ssp_dai, 1);
+	if (ret != 0) {
+		dev_err(&pdev->dev, "Failed to register DAI\n");
+		return ret;
+	}
+
+	if (strcmp(platform_driver_name, "tdma_platform") == 0) {
+		ret = mmp_pcm_platform_register(&pdev->dev);
+		/* add ssp_mfp sysfs entries */
+		ret = device_create_file(&pdev->dev, &dev_attr_ssp_mfp);
+		if (ret < 0)
+			dev_err(&pdev->dev,
+				"%s: failed to add ssp_mfp sysfs files: %d\n",
+				__func__, ret);
+	} else if (strcmp(platform_driver_name, "pdma_platform") == 0) {
+		ret = pxa_pcm_platform_register(&pdev->dev);
+		/* add gssp_mfp sysfs entries */
+		ret = device_create_file(&pdev->dev, &dev_attr_gssp_mfp);
+		if (ret < 0)
+			dev_err(&pdev->dev,
+				"%s: failed to add gssp_mfp sysfs files: %d\n",
+				__func__, ret);
+	}
+
+	return ret;
 }
 
 static int asoc_ssp_remove(struct platform_device *pdev)
 {
-	snd_soc_unregister_component(&pdev->dev);
+	struct device_node *np = pdev->dev.of_node;
+	char const *platform_driver_name;
+
+	if (of_property_read_string(np,
+				"platform_driver_name",
+				&platform_driver_name)) {
+		dev_err(&pdev->dev,
+			"Missing platform_driver_name property in the DT\n");
+		return -EINVAL;
+	}
+
+	if (strcmp(platform_driver_name, "tdma_platform") == 0) {
+		device_remove_file(&pdev->dev, &dev_attr_ssp_mfp);
+		mmp_pcm_platform_unregister(&pdev->dev);
+	} else if (strcmp(platform_driver_name, "pdma_platform") == 0) {
+		device_remove_file(&pdev->dev, &dev_attr_gssp_mfp);
+		snd_soc_unregister_component(&pdev->dev);
+	}
+
 	return 0;
 }
 

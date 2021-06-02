@@ -853,6 +853,7 @@ static int snd_pcm_pre_start(struct snd_pcm_substream *substream, int state)
 	if (runtime->status->state != SNDRV_PCM_STATE_PREPARED)
 		return -EBADFD;
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK &&
+	    !substream->hw_no_buffer &&
 	    !snd_pcm_playback_data(substream))
 		return -EPIPE;
 	runtime->trigger_master = substream;
@@ -861,25 +862,35 @@ static int snd_pcm_pre_start(struct snd_pcm_substream *substream, int state)
 
 static int snd_pcm_do_start(struct snd_pcm_substream *substream, int state)
 {
+	int ret;
 	if (substream->runtime->trigger_master != substream)
 		return 0;
-	return substream->ops->trigger(substream, SNDRV_PCM_TRIGGER_START);
+	ret = substream->ops->trigger(substream, SNDRV_PCM_TRIGGER_START);
+	if (ret == 0)
+		substream->running = 1;
+
+	return ret;
 }
 
 static void snd_pcm_undo_start(struct snd_pcm_substream *substream, int state)
 {
 	if (substream->runtime->trigger_master == substream)
 		substream->ops->trigger(substream, SNDRV_PCM_TRIGGER_STOP);
+	substream->running = 0;
 }
 
 static void snd_pcm_post_start(struct snd_pcm_substream *substream, int state)
 {
 	struct snd_pcm_runtime *runtime = substream->runtime;
+	/* for hw_no_buffer substream, trigger dai directly */
+	runtime->status->state = state;
+	if (substream->hw_no_buffer)
+		return;
+
 	snd_pcm_trigger_tstamp(substream);
 	runtime->hw_ptr_jiffies = jiffies;
 	runtime->hw_ptr_buffer_jiffies = (runtime->buffer_size * HZ) / 
 							    runtime->rate;
-	runtime->status->state = state;
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK &&
 	    runtime->silence_size > 0)
 		snd_pcm_playback_silence(substream, ULONG_MAX);
@@ -924,6 +935,9 @@ static int snd_pcm_do_stop(struct snd_pcm_substream *substream, int state)
 	if (substream->runtime->trigger_master == substream &&
 	    snd_pcm_running(substream))
 		substream->ops->trigger(substream, SNDRV_PCM_TRIGGER_STOP);
+
+	substream->running = 0;
+
 	return 0; /* unconditonally stop all substreams */
 }
 
@@ -997,6 +1011,7 @@ static int snd_pcm_pre_pause(struct snd_pcm_substream *substream, int push)
 
 static int snd_pcm_do_pause(struct snd_pcm_substream *substream, int push)
 {
+	int ret;
 	if (substream->runtime->trigger_master != substream)
 		return 0;
 	/* some drivers might use hw_ptr to recover from the pause -
@@ -1008,9 +1023,12 @@ static int snd_pcm_do_pause(struct snd_pcm_substream *substream, int push)
 	 * delta, effectively to skip the check once.
 	 */
 	substream->runtime->hw_ptr_jiffies = jiffies - HZ * 1000;
-	return substream->ops->trigger(substream,
+	ret = substream->ops->trigger(substream,
 				       push ? SNDRV_PCM_TRIGGER_PAUSE_PUSH :
 					      SNDRV_PCM_TRIGGER_PAUSE_RELEASE);
+	if (ret == 0)
+		substream->running = push ? 0 : 1;
+	return ret;
 }
 
 static void snd_pcm_undo_pause(struct snd_pcm_substream *substream, int push)
@@ -1019,6 +1037,7 @@ static void snd_pcm_undo_pause(struct snd_pcm_substream *substream, int push)
 		substream->ops->trigger(substream,
 					push ? SNDRV_PCM_TRIGGER_PAUSE_RELEASE :
 					SNDRV_PCM_TRIGGER_PAUSE_PUSH);
+	substream->running = push ? 1 : 0;
 }
 
 static void snd_pcm_post_pause(struct snd_pcm_substream *substream, int push)
@@ -1373,7 +1392,11 @@ static int snd_pcm_prepare(struct snd_pcm_substream *substream,
 	if ((res = snd_power_wait(card, SNDRV_CTL_POWER_D0)) >= 0)
 		res = snd_pcm_action_nonatomic(&snd_pcm_action_prepare,
 					       substream, f_flags);
+	/* for hw_no_buffer substream, trigger dai directly */
+	if (substream->hw_no_buffer)
+		snd_pcm_start(substream);
 	snd_power_unlock(card);
+
 	return res;
 }
 

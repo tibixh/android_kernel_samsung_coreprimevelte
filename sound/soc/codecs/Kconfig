@@ -146,6 +146,9 @@ config SND_SOC_ALL_CODECS
 config SND_SOC_88PM860X
 	tristate
 
+config SND_SOC_88PM805
+	tristate
+
 config SND_SOC_ARIZONA
 	tristate
 	default y if SND_SOC_WM5102=y
@@ -554,3 +557,44 @@ config SND_SOC_ML26124
 
 config SND_SOC_TPA6130A2
 	tristate
+
+config SND_MMP_MAP_FE_DAI
+	tristate
+
+config SND_SOC_88PM860
+	tristate
+
+config SND_SOC_88PM800_HS
+	tristate "88pm800 Headset"
+	depends on MFD_88PM800
+	help
+	  Say Y if you what use 88pm800 chip
+	  for the headset detect
+	  function.
+
+config SND_SOC_88PM88X_HS
+	tristate "88pm88x Headset"
+	depends on MFD_88PM88X
+	help
+	  Say Y if you what use 88pm88x chip
+	  for the headset detect
+	  function.
+
+config DUAL_SPEAKER
+	tristate "Dual Speaker"
+
+config SND_SOC_88PM88X_EARIC
+	tristate "88PM88X Ear Detection IC with AP interrupt KSND"
+	depends on SND_SOC_88PM88X_HS 
+	default n
+	help
+	  Say Y if you want to use sysfs
+	  for checking headset adc or state
+
+config SND_SOC_88PM88X_SYSFS
+	bool "EarJack & BTN adc sysfs KSND"
+	depends on SND_SOC_88PM88X_HS
+	default n
+	help
+	  This is sysfs for headset driver jack type and
+	  btn type adc values.

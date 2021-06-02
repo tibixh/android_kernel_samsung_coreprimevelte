@@ -21,8 +21,62 @@
  */
 #include <linux/module.h>
 #include <linux/dma-mapping.h>
+#include <linux/vmalloc.h>
+#include <asm/cacheflush.h>
+#include <linux/pm_runtime.h>
 #include <linux/platform_device.h>
+#include <linux/of.h>
+#include <linux/of_device.h>
 #include "mmpfb.h"
+#include "../hw/mmp_ctrl.h"
+#if defined(CONFIG_SEC_DEBUG)
+#include <linux/sec-debug.h>
+#endif
+
+/* As bootloader always enable display, so we usually skip power on sequence in kernel */
+static unsigned int no_skipped_power_on;
+static int __init early_fbboot(char *str)
+{
+	/* If no_skipped_power_on, kernel will follow normal display power on sequence */
+	no_skipped_power_on = 1;
+	return 0;
+}
+early_param("fbboot", early_fbboot);
+
+static int __init early_resolution(char *str)
+{
+	int ret = 0;
+	char *width_str;
+	char *height_str;
+
+	width_str = strchr(str, 'x');
+	height_str = strsep(&str, "x");
+
+	if (unlikely(!width_str)) {
+		pr_err("%s, width not found\n", __func__);
+		return -EINVAL;
+	}
+
+	if (unlikely(!height_str)) {
+		pr_err("%s, height not found\n", __func__);
+		return -EINVAL;
+	}
+
+	ret = kstrtoul(height_str, 0, &virtual_x);
+	if (ret < 0) {
+		pr_err("strtoul err.\n");
+		return ret;
+	}
+
+	ret = kstrtoul(width_str + 1, 0, &virtual_y);
+	if (ret < 0) {
+		pr_err("strtoul err.\n");
+		return ret;
+	}
+
+	return 1;
+}
+early_param("resolution.lcd", early_resolution);
 
 static int var_to_pixfmt(struct fb_var_screeninfo *var)
 {
@@ -55,6 +109,17 @@ static int var_to_pixfmt(struct fb_var_screeninfo *var)
 	}
 
 	/*
+	 * Check for YUV420SEMIPLANAR.
+	 */
+	if (var->bits_per_pixel == 12 && var->red.length == 8 &&
+			(var->green.length == 0 || var->blue.length == 0)) {
+		if (var->green.length)
+			return PIXFMT_YUV420SP;
+		else
+			return PIXFMT_YVU420SP;
+	}
+
+	/*
 	 * Check for YUV422PACK.
 	 */
 	if (var->bits_per_pixel == 16 && var->red.length == 16 &&
@@ -74,9 +139,9 @@ static int var_to_pixfmt(struct fb_var_screeninfo *var)
 			var->green.length <= 6 && var->blue.length <= 5) {
 		if (var->transp.length == 0) {
 			if (var->red.offset >= var->blue.offset)
-				return PIXFMT_RGB565;
-			else
 				return PIXFMT_BGR565;
+			else
+				return PIXFMT_RGB565;
 		}
 	}
 
@@ -87,21 +152,21 @@ static int var_to_pixfmt(struct fb_var_screeninfo *var)
 			var->green.length <= 8 && var->blue.length <= 8) {
 		if (var->bits_per_pixel == 24 && var->transp.length == 0) {
 			if (var->red.offset >= var->blue.offset)
-				return PIXFMT_RGB888PACK;
-			else
 				return PIXFMT_BGR888PACK;
+			else
+				return PIXFMT_RGB888PACK;
 		}
 
 		if (var->bits_per_pixel == 32 && var->transp.offset == 24) {
 			if (var->red.offset >= var->blue.offset)
-				return PIXFMT_RGBA888;
-			else
 				return PIXFMT_BGRA888;
+			else
+				return PIXFMT_RGBA888;
 		} else {
 			if (var->red.offset >= var->blue.offset)
-				return PIXFMT_RGB888UNPACK;
-			else
 				return PIXFMT_BGR888UNPACK;
+			else
+				return PIXFMT_RGB888UNPACK;
 		}
 
 		/* fall through */
@@ -113,56 +178,56 @@ static int var_to_pixfmt(struct fb_var_screeninfo *var)
 static void pixfmt_to_var(struct fb_var_screeninfo *var, int pix_fmt)
 {
 	switch (pix_fmt) {
-	case PIXFMT_RGB565:
+	case PIXFMT_BGR565:
 		var->bits_per_pixel = 16;
 		var->red.offset = 11;	var->red.length = 5;
 		var->green.offset = 5;   var->green.length = 6;
 		var->blue.offset = 0;	var->blue.length = 5;
 		var->transp.offset = 0;  var->transp.length = 0;
 		break;
-	case PIXFMT_BGR565:
+	case PIXFMT_RGB565:
 		var->bits_per_pixel = 16;
 		var->red.offset = 0;	var->red.length = 5;
 		var->green.offset = 5;	 var->green.length = 6;
 		var->blue.offset = 11;	var->blue.length = 5;
 		var->transp.offset = 0;  var->transp.length = 0;
 		break;
-	case PIXFMT_RGB888UNPACK:
+	case PIXFMT_BGR888UNPACK:
 		var->bits_per_pixel = 32;
 		var->red.offset = 16;	var->red.length = 8;
 		var->green.offset = 8;   var->green.length = 8;
 		var->blue.offset = 0;	var->blue.length = 8;
 		var->transp.offset = 0;  var->transp.length = 0;
 		break;
-	case PIXFMT_BGR888UNPACK:
+	case PIXFMT_RGB888UNPACK:
 		var->bits_per_pixel = 32;
 		var->red.offset = 0;	var->red.length = 8;
 		var->green.offset = 8;	 var->green.length = 8;
 		var->blue.offset = 16;	var->blue.length = 8;
 		var->transp.offset = 0;  var->transp.length = 0;
-		break;
-	case PIXFMT_RGBA888:
-		var->bits_per_pixel = 32;
-		var->red.offset = 16;	var->red.length = 8;
-		var->green.offset = 8;   var->green.length = 8;
-		var->blue.offset = 0;	var->blue.length = 8;
-		var->transp.offset = 24; var->transp.length = 8;
 		break;
 	case PIXFMT_BGRA888:
 		var->bits_per_pixel = 32;
+		var->red.offset = 16;	var->red.length = 8;
+		var->green.offset = 8;   var->green.length = 8;
+		var->blue.offset = 0;	var->blue.length = 8;
+		var->transp.offset = 24; var->transp.length = 8;
+		break;
+	case PIXFMT_RGBA888:
+		var->bits_per_pixel = 32;
 		var->red.offset = 0;	var->red.length = 8;
 		var->green.offset = 8;	 var->green.length = 8;
 		var->blue.offset = 16;	var->blue.length = 8;
 		var->transp.offset = 24; var->transp.length = 8;
 		break;
-	case PIXFMT_RGB888PACK:
+	case PIXFMT_BGR888PACK:
 		var->bits_per_pixel = 24;
 		var->red.offset = 16;	var->red.length = 8;
 		var->green.offset = 8;   var->green.length = 8;
 		var->blue.offset = 0;	var->blue.length = 8;
 		var->transp.offset = 0;  var->transp.length = 0;
 		break;
-	case PIXFMT_BGR888PACK:
+	case PIXFMT_RGB888PACK:
 		var->bits_per_pixel = 24;
 		var->red.offset = 0;	var->red.length = 8;
 		var->green.offset = 8;	 var->green.length = 8;
@@ -181,6 +246,20 @@ static void pixfmt_to_var(struct fb_var_screeninfo *var, int pix_fmt)
 		var->red.offset = 4;	 var->red.length = 8;
 		var->green.offset = 0;	 var->green.length = 2;
 		var->blue.offset = 2;	var->blue.length = 2;
+		var->transp.offset = 0;  var->transp.length = 0;
+		break;
+	case PIXFMT_YUV420SP:
+		var->bits_per_pixel = 12;
+		var->red.offset = 4;	 var->red.length = 8;
+		var->green.offset = 2;   var->green.length = 4;
+		var->blue.offset = 0;   var->blue.length = 0;
+		var->transp.offset = 0;  var->transp.length = 0;
+		break;
+	case PIXFMT_YVU420SP:
+		var->bits_per_pixel = 12;
+		var->red.offset = 4;	 var->red.length = 8;
+		var->green.offset = 0;	 var->green.length = 0;
+		var->blue.offset = 2;	var->blue.length = 4;
 		var->transp.offset = 0;  var->transp.length = 0;
 		break;
 	case PIXFMT_YUV422P:
@@ -253,8 +332,8 @@ static void fbmode_to_mmpmode(struct mmp_mode *mode,
 	mode->lower_margin = videomode->lower_margin;
 	mode->hsync_len = videomode->hsync_len;
 	mode->vsync_len = videomode->vsync_len;
-	mode->hsync_invert = !!(videomode->sync & FB_SYNC_HOR_HIGH_ACT);
-	mode->vsync_invert = !!(videomode->sync & FB_SYNC_VERT_HIGH_ACT);
+	mode->hsync_invert = !(videomode->sync & FB_SYNC_HOR_HIGH_ACT);
+	mode->vsync_invert = !(videomode->sync & FB_SYNC_VERT_HIGH_ACT);
 	/* no defined flag in fb, use vmode>>3*/
 	mode->invert_pixclock = !!(videomode->vmode & 8);
 	mode->pix_fmt_out = output_fmt;
@@ -279,16 +358,14 @@ static void mmpmode_to_fbmode(struct fb_videomode *videomode,
 	videomode->lower_margin = mode->lower_margin;
 	videomode->hsync_len = mode->hsync_len;
 	videomode->vsync_len = mode->vsync_len;
-	videomode->sync = (mode->hsync_invert ? FB_SYNC_HOR_HIGH_ACT : 0)
-		| (mode->vsync_invert ? FB_SYNC_VERT_HIGH_ACT : 0);
+	videomode->sync = (mode->hsync_invert ? 0 : FB_SYNC_HOR_HIGH_ACT)
+		| (mode->vsync_invert ? 0 : FB_SYNC_VERT_HIGH_ACT);
 	videomode->vmode = mode->invert_pixclock ? 8 : 0;
 }
 
 static int mmpfb_check_var(struct fb_var_screeninfo *var,
 		struct fb_info *info)
 {
-	struct mmpfb_info *fbi = info->par;
-
 	if (var->bits_per_pixel == 8)
 		return -EINVAL;
 	/*
@@ -303,7 +380,7 @@ static int mmpfb_check_var(struct fb_var_screeninfo *var,
 	 * Check size of framebuffer.
 	 */
 	if (var->xres_virtual * var->yres_virtual *
-			(var->bits_per_pixel >> 3) > fbi->fb_size)
+			(var->bits_per_pixel >> 3) > MMPFB_DEFAULT_SIZE)
 		return -EINVAL;
 
 	return 0;
@@ -345,16 +422,119 @@ static int mmpfb_setcolreg(unsigned int regno, unsigned int red,
 	return 0;
 }
 
+static void mmpfb_set_win(struct fb_info *info)
+{
+	struct mmpfb_info *fbi = info->par;
+	struct fb_var_screeninfo *var = &info->var;
+	struct mmp_path *path = fbi->path;
+	struct mmp_win win;
+	u32 stride;
+
+	memset(&win, 0, sizeof(win));
+	win.xsrc = win.xdst = fbi->mode.xres;
+	win.ysrc = win.ydst = fbi->mode.yres;
+	if (path && (path->mode.xres != fbi->mode.xres))
+		win.xdst = path->mode.xres;
+	if (path && (path->mode.yres != fbi->mode.yres))
+		win.ydst = path->mode.yres;
+	win.pix_fmt = fbi->pix_fmt;
+	stride = pixfmt_to_stride(win.pix_fmt);
+	win.pitch[0] = var->xres_virtual * stride;
+	win.pitch[1] = win.pitch[2] =
+		(stride == 1) ? (var->xres_virtual >> 1) : 0;
+	mmp_overlay_set_win(fbi->overlay, &win);
+}
+
+static void mmpfb_set_address(struct fb_var_screeninfo *var,
+		struct mmpfb_info *fb_info)
+{
+	struct mmp_addr addr;
+	u32 frame_size, pitch, line_length;
+
+	memset(&addr, 0, sizeof(addr));
+
+	line_length = var->xres_virtual * var->bits_per_pixel / 8;
+
+	if (fb_info->overlay->decompress) {
+		pitch = PITCH_ALIGN_FOR_DECOMP(line_length);
+		frame_size = pitch * MMP_YALIGN(var->yres);
+		/*
+		 * FIXME: hdr_size = frame_size/512, for decompression mode
+		 * 256 bytes per unit, and 4 bits(1/2 byte) for one unit status.
+		 */
+		addr.hdr_size[0] = frame_size >> 9;
+		/* FIXME: frame address should be 256 bytes align, the buffer
+		 * to save header should be pitch aligned */
+		addr.phys[0] = fb_info->fb_start_dma + var->yoffset * pitch;
+		addr.hdr_addr[0] = addr.phys[0] + frame_size;
+		/* FIXME:
+		 * decompress mode buffer mapping:
+		 * _____________________ ->fb_start_dma
+		 * |                   |
+		 * |___________________| ->hdr_addr_start
+		 * |___________________|
+		 *
+		 *  ...
+		 */
+	} else
+		addr.phys[0] = (var->yoffset * var->xres_virtual + var->xoffset)
+			* var->bits_per_pixel / 8 + fb_info->fb_start_dma;
+	mmp_overlay_set_addr(fb_info->overlay, &addr);
+}
+
 static int mmpfb_pan_display(struct fb_var_screeninfo *var,
 		struct fb_info *info)
 {
 	struct mmpfb_info *fbi = info->par;
-	struct mmp_addr addr;
+	int decompress_en;
+	unsigned long flags;
 
-	memset(&addr, 0, sizeof(addr));
-	addr.phys[0] = (var->yoffset * var->xres_virtual + var->xoffset)
-		* var->bits_per_pixel / 8 + fbi->fb_start_dma;
-	mmp_overlay_set_addr(fbi->overlay, &addr);
+	if (!mmp_path_ctrl_safe(fbi->path))
+		return -EINVAL;
+
+	/*
+	 * Pan_display will enable irq,
+	 * IRQ will be disabled in irq handler.
+	 */
+	if (!atomic_read(&fbi->path->irq_en_count)) {
+		atomic_inc(&fbi->path->irq_en_count);
+		mmp_path_set_irq(fbi->path, 1);
+	}
+
+	/*
+	 * Check if many pan_display comes in one frame, if yes,
+	 * need to wait vsync.
+	 */
+	mmpfb_wait_vsync(fbi);
+
+	/*
+	 * update buffer: need spin lock to protect
+	 */
+	spin_lock_irqsave(&fbi->path->vcnt_lock, flags);
+	/*
+	 * If the pan_display is delayed to next frame,it will try to
+	 * enable irq, IRQ will be disabled in irq handler.
+	 */
+	if (atomic_read(&fbi->vsync.vcnt) == 2) {
+		atomic_dec(&fbi->vsync.vcnt);
+		if (!atomic_read(&fbi->path->irq_en_count)) {
+			atomic_inc(&fbi->path->irq_en_count);
+			mmp_path_set_irq(fbi->path, 1);
+		}
+	}
+
+	/*
+	 * update buffer info
+	 */
+	decompress_en = !!(var->reserved[0] & DECOMPRESS_MODE);
+	pr_debug("%s: decompress_en : %d\n", __func__, decompress_en);
+	if (decompress_en != fbi->overlay->decompress) {
+		mmp_overlay_decompress_en(fbi->overlay, decompress_en);
+		mmpfb_set_win(info);
+	}
+	mmpfb_set_address(var, fbi);
+	mmp_path_set_trigger(fbi->path);
+	spin_unlock_irqrestore(&fbi->path->vcnt_lock, flags);
 
 	return 0;
 }
@@ -379,44 +559,27 @@ static int var_update(struct fb_info *info)
 		dev_err(fbi->dev, "set par: no match mode, use best mode\n");
 		m = (struct fb_videomode *)fb_find_best_mode(var,
 				&info->modelist);
-		fb_videomode_to_var(var, m);
+		if (m)
+			fb_videomode_to_var(var, m);
 	}
 	memcpy(&fbi->mode, m, sizeof(struct fb_videomode));
 
-	/* fix to 2* yres */
-	var->yres_virtual = var->yres * 2;
 	info->fix.visual = (pix_fmt == PIXFMT_PSEUDOCOLOR) ?
 		FB_VISUAL_PSEUDOCOLOR : FB_VISUAL_TRUECOLOR;
 	info->fix.line_length = var->xres_virtual * var->bits_per_pixel / 8;
-	info->fix.ypanstep = var->yres;
+	info->fix.ypanstep = 1;
 	return 0;
-}
-
-static void mmpfb_set_win(struct fb_info *info)
-{
-	struct mmpfb_info *fbi = info->par;
-	struct fb_var_screeninfo *var = &info->var;
-	struct mmp_win win;
-	u32 stride;
-
-	memset(&win, 0, sizeof(win));
-	win.xsrc = win.xdst = fbi->mode.xres;
-	win.ysrc = win.ydst = fbi->mode.yres;
-	win.pix_fmt = fbi->pix_fmt;
-	stride = pixfmt_to_stride(win.pix_fmt);
-	win.pitch[0] = var->xres_virtual * stride;
-	win.pitch[1] = win.pitch[2] =
-		(stride == 1) ? (var->xres_virtual >> 1) : 0;
-	mmp_overlay_set_win(fbi->overlay, &win);
 }
 
 static int mmpfb_set_par(struct fb_info *info)
 {
 	struct mmpfb_info *fbi = info->par;
 	struct fb_var_screeninfo *var = &info->var;
-	struct mmp_addr addr;
-	struct mmp_mode mode;
-	int ret;
+	struct mmp_mode mode, *mmp_modes = NULL;
+	int ret, videomode_num;
+
+	if (!mmp_path_ctrl_safe(fbi->path))
+		return -EINVAL;
 
 	ret = var_update(info);
 	if (ret != 0)
@@ -424,46 +587,80 @@ static int mmpfb_set_par(struct fb_info *info)
 
 	/* set window/path according to new videomode */
 	fbmode_to_mmpmode(&mode, &fbi->mode, fbi->output_fmt);
-	mmp_path_set_mode(fbi->path, &mode);
+
+	/* get videomodes from path and update the real xres and yres */
+	videomode_num = mmp_path_get_modelist(fbi->path, &mmp_modes);
+	if (!videomode_num) {
+		dev_warn(fbi->dev, "can't get videomode num\n");
+		mode.real_xres = mode.xres;
+		mode.real_yres = mode.yres;
+	}
+
+	if (mmp_modes != NULL) {
+		mode.real_xres = mmp_modes[0].real_xres;
+		mode.real_yres = mmp_modes[0].real_yres;
+
+		mmp_path_set_mode(fbi->path, &mode);
+	}
 
 	/* set window related info */
 	mmpfb_set_win(info);
 
 	/* set address always */
-	memset(&addr, 0, sizeof(addr));
-	addr.phys[0] = (var->yoffset * var->xres_virtual + var->xoffset)
-		* var->bits_per_pixel / 8 + fbi->fb_start_dma;
-	mmp_overlay_set_addr(fbi->overlay, &addr);
+	mmpfb_set_address(var, fbi);
+	mmp_path_set_commit(fbi->path);
 
 	return 0;
 }
 
 static void mmpfb_power(struct mmpfb_info *fbi, int power)
 {
-	struct mmp_addr addr;
-	struct fb_var_screeninfo *var = &fbi->fb_info->var;
+	if (!mmp_path_ctrl_safe(fbi->path))
+		return;
 
-	/* for power on, always set address/window again */
-	if (power) {
-		/* set window related info */
-		mmpfb_set_win(fbi->fb_info);
-
-		/* set address always */
-		memset(&addr, 0, sizeof(addr));
-		addr.phys[0] = fbi->fb_start_dma +
-			(var->yoffset * var->xres_virtual + var->xoffset)
-			* var->bits_per_pixel / 8;
-		mmp_overlay_set_addr(fbi->overlay, &addr);
-	}
-	mmp_overlay_set_onoff(fbi->overlay, power);
+	mmp_overlay_set_status(fbi->overlay, power);
 }
 
 static int mmpfb_blank(int blank, struct fb_info *info)
 {
 	struct mmpfb_info *fbi = info->par;
+	struct mmphw_ctrl *ctrl = path_to_ctrl(fbi->path);
 
-	mmpfb_power(fbi, (blank == FB_BLANK_UNBLANK));
+	if (blank == FB_BLANK_UNBLANK) {
+		pm_runtime_forbid(ctrl->dev);
+		mmpfb_power(fbi, MMP_ON);
+		fb_set_suspend(info, 0);
+	} else {
+		fb_set_suspend(info, 1);
+		mmpfb_power(fbi, MMP_OFF);
+		pm_runtime_allow(ctrl->dev);
+	}
 
+	return 0;
+}
+
+static int mmpfb_open(struct fb_info *info, int user)
+{
+	struct mmpfb_info *fbi = info->par;
+
+	if (!atomic_read(&fbi->op_count))
+		mmpfb_fence_sync_open(info);
+
+	atomic_inc(&fbi->op_count);
+	dev_info(info->dev, "mmpfb open: op_count = %d\n",
+		 atomic_read(&fbi->op_count));
+	return 0;
+}
+
+static int mmpfb_release(struct fb_info *info, int user)
+{
+	struct mmpfb_info *fbi = info->par;
+
+	if (atomic_dec_and_test(&fbi->op_count))
+		mmpfb_fence_sync_release(info);
+
+	dev_info(info->dev, "mmpfb release: op_count = %d\n",
+		 atomic_read(&fbi->op_count));
 	return 0;
 }
 
@@ -474,6 +671,12 @@ static struct fb_ops mmpfb_ops = {
 	.fb_set_par	= mmpfb_set_par,
 	.fb_setcolreg	= mmpfb_setcolreg,
 	.fb_pan_display	= mmpfb_pan_display,
+	.fb_ioctl	= mmpfb_ioctl,
+#ifdef CONFIG_COMPAT
+	.fb_compat_ioctl	= mmpfb_compat_ioctl,
+#endif
+	.fb_open	= mmpfb_open,
+	.fb_release	= mmpfb_release,
 	.fb_fillrect	= cfb_fillrect,
 	.fb_copyarea	= cfb_copyarea,
 	.fb_imageblit	= cfb_imageblit,
@@ -492,6 +695,7 @@ static int modes_setup(struct mmpfb_info *fbi)
 		dev_warn(fbi->dev, "can't get videomode num\n");
 		return 0;
 	}
+	mmpfb_check_virtual_mode(mmp_modes);
 	/* put videomode list to info structure */
 	videomodes = kzalloc(sizeof(struct fb_videomode) * videomode_num,
 			GFP_KERNEL);
@@ -507,6 +711,9 @@ static int modes_setup(struct mmpfb_info *fbi)
 	memcpy(&fbi->mode, &videomodes[0], sizeof(struct fb_videomode));
 	fbi->output_fmt = mmp_modes[0].pix_fmt_out;
 	fb_videomode_to_var(&info->var, &fbi->mode);
+	/* set screen width and height in mm */
+	info->var.height = mmp_modes[0].height;
+	info->var.width = mmp_modes[0].width;
 	mmp_path_set_mode(fbi->path, &mmp_modes[0]);
 
 	kfree(videomodes);
@@ -525,7 +732,7 @@ static int fb_info_setup(struct fb_info *info,
 	info->fix.type = FB_TYPE_PACKED_PIXELS;
 	info->fix.type_aux = 0;
 	info->fix.xpanstep = 0;
-	info->fix.ypanstep = info->var.yres;
+	info->fix.ypanstep = 1;
 	info->fix.ywrapstep = 0;
 	info->fix.accel = FB_ACCEL_NONE;
 	info->fix.smem_start = fbi->fb_start_dma;
@@ -551,18 +758,59 @@ static void fb_info_clear(struct fb_info *info)
 	fb_dealloc_cmap(&info->cmap);
 }
 
+#ifdef CONFIG_OF
+static const struct of_device_id mmp_fb_dt_match[] = {
+	{ .compatible = "marvell,mmp-fb" },
+	{},
+};
+#endif
+
+static void *fb_remap_framebuffer(size_t size, dma_addr_t dma)
+{
+	int nr, i = 0;
+	struct page **pages;
+	void *start = NULL;
+
+	size = PAGE_ALIGN(size);
+	nr = size >> PAGE_SHIFT;
+
+	/* invalidate the buffer before vmap as noncacheable */
+	flush_cache_all();
+#ifdef CONFIG_OUTER_CACHE
+	outer_flush_range(dma, dma + size);
+#endif
+
+	pages = vmalloc(sizeof(struct page *) * nr);
+	if (pages == NULL) {
+		BUG_ON("fb remap framebuffer failed\n");
+		return NULL;
+	}
+
+	while (i < nr) {
+		pages[i] = phys_to_page(dma + (i << PAGE_SHIFT));
+		i++;
+	}
+	start = vmap(pages, nr, 0, pgprot_writecombine(PAGE_KERNEL));
+
+	vfree(pages);
+	return start;
+}
+
+static void fb_free_framebuffer(void *vaddr)
+{
+	vunmap(vaddr);
+	return;
+}
+
 static int mmpfb_probe(struct platform_device *pdev)
 {
 	struct mmp_buffer_driver_mach_info *mi;
 	struct fb_info *info = 0;
 	struct mmpfb_info *fbi = 0;
-	int ret, modes_num;
-
-	mi = pdev->dev.platform_data;
-	if (mi == NULL) {
-		dev_err(&pdev->dev, "no platform data defined\n");
-		return -EINVAL;
-	}
+	int ret, modes_num, dc_size, pitch;
+	int overlay_id = 0, buf_num = 2;
+	const char *path_name;
+	u32 start_addr;
 
 	/* initialize fb */
 	info = framebuffer_alloc(sizeof(struct mmpfb_info), &pdev->dev);
@@ -574,19 +822,53 @@ static int mmpfb_probe(struct platform_device *pdev)
 		goto failed;
 	}
 
+	if (IS_ENABLED(CONFIG_OF)) {
+		struct device_node *np = pdev->dev.of_node;
+
+		if (!np)
+			return -EINVAL;
+		if (of_property_read_string(np, "marvell,fb-name", &fbi->name))
+			return -EINVAL;
+		if (of_property_read_string(np, "marvell,path-name",
+					    &path_name))
+			return -EINVAL;
+		if (of_property_read_u32(np, "marvell,overlay-id",
+					 &overlay_id))
+			return -EINVAL;
+		if (of_property_read_u32(np, "marvell,default-pixfmt",
+					&fbi->pix_fmt))
+			return -EINVAL;
+		if (of_property_read_u32(np, "marvell,buffer-num", &buf_num))
+			return -EINVAL;
+		if (of_property_read_u32(np, "marvell,fb-mem", &start_addr))
+			return -EINVAL;
+		fbi->fb_start_dma = start_addr;
+	} else {
+		mi = pdev->dev.platform_data;
+		if (mi == NULL) {
+			dev_err(&pdev->dev, "no platform data defined\n");
+			return -EINVAL;
+		}
+		fbi->name = mi->name;
+		fbi->pix_fmt = mi->default_pixfmt;
+		buf_num = mi->buffer_num;
+		path_name = mi->path_name;
+		overlay_id = mi->overlay_id;
+	}
+
 	/* init fb */
 	fbi->fb_info = info;
 	platform_set_drvdata(pdev, fbi);
 	fbi->dev = &pdev->dev;
-	fbi->name = mi->name;
-	fbi->pix_fmt = mi->default_pixfmt;
 	pixfmt_to_var(&info->var, fbi->pix_fmt);
+	fbi->buffer_num = buf_num ? buf_num : 2;
 	mutex_init(&fbi->access_ok);
+	mutex_init(&fbi->fence_mutex);
 
 	/* get display path by name */
-	fbi->path = mmp_get_path(mi->path_name);
+	fbi->path = mmp_get_path(path_name);
 	if (!fbi->path) {
-		dev_err(&pdev->dev, "can't get the path %s\n", mi->path_name);
+		dev_err(&pdev->dev, "can't get the path %s\n", path_name);
 		ret = -EINVAL;
 		goto failed_destroy_mutex;
 	}
@@ -594,13 +876,11 @@ static int mmpfb_probe(struct platform_device *pdev)
 	dev_info(fbi->dev, "path %s get\n", fbi->path->name);
 
 	/* get overlay */
-	fbi->overlay = mmp_path_get_overlay(fbi->path, mi->overlay_id);
+	fbi->overlay = mmp_path_get_overlay(fbi->path, overlay_id);
 	if (!fbi->overlay) {
 		ret = -EINVAL;
 		goto failed_destroy_mutex;
 	}
-	/* set fetch used */
-	mmp_overlay_set_fetch(fbi->overlay, mi->dmafetch_id);
 
 	modes_num = modes_setup(fbi);
 	if (modes_num < 0) {
@@ -613,29 +893,79 @@ static int mmpfb_probe(struct platform_device *pdev)
 	 * or use default size
 	 */
 	if (modes_num > 0) {
-		/* fix to 2* yres */
-		info->var.yres_virtual = info->var.yres * 2;
+		if (DISP_GEN4(mmp_path_get_version(fbi->path)) &&
+			!DISP_GEN4_LITE(mmp_path_get_version(fbi->path))) {
+			info->var.xres_virtual = MMP_XALIGN_GEN4(info->var.xres);
+			info->var.yres_virtual = MMP_YALIGN_GEN4(info->var.yres);
+		} else {
+			info->var.xres_virtual = MMP_XALIGN(info->var.xres);
+			info->var.yres_virtual = MMP_YALIGN(info->var.yres);
+		}
 
-		/* Allocate framebuffer memory: size = modes xy *4 */
-		fbi->fb_size = info->var.xres_virtual * info->var.yres_virtual
-				* info->var.bits_per_pixel / 8;
+		pitch = info->var.xres_virtual * info->var.bits_per_pixel / 8;
+		/*one framebuffer data memory size */
+		fbi->fb_size = pitch * info->var.yres_virtual;
+
+		if (!DISP_GEN4_LITE(mmp_path_get_version(fbi->path))) {
+			/* one framebuffer decoder-header size */
+			dc_size = fbi->fb_size / 512;
+			/* one decoder-header size aligned to pitch */
+			if (dc_size % pitch)
+				dc_size = (dc_size / pitch + 1) * pitch;
+
+			/*one framebuffer memory size : data + decoder-header */
+			fbi->fb_size += dc_size;
+
+			/* yres_virtual for totally framebuffer */
+			info->var.yres_virtual = (info->var.yres_virtual + dc_size/pitch)
+				* fbi->buffer_num;
+		} else
+			/* yres_virtual for totally framebuffer */
+			info->var.yres_virtual = info->var.yres_virtual * fbi->buffer_num;
+
+		/* Totally framebuffer memory size and make it PAGE_ALIGN */
+		fbi->fb_size = PAGE_ALIGN(fbi->fb_size * fbi->buffer_num);
+
+		if (is_virtual_display)
+			fbi->fb_size = MMPFB_DEFAULT_SIZE;
 	} else {
 		fbi->fb_size = MMPFB_DEFAULT_SIZE;
 	}
 
-	fbi->fb_start = dma_alloc_coherent(&pdev->dev, PAGE_ALIGN(fbi->fb_size),
-				&fbi->fb_start_dma, GFP_KERNEL);
-	if (fbi->fb_start == NULL) {
-		dev_err(&pdev->dev, "can't alloc framebuffer\n");
+	if (fbi->fb_start_dma)
+		fbi->fb_start = fb_remap_framebuffer(fbi->fb_size,
+				fbi->fb_start_dma);
+	else {
 		ret = -ENOMEM;
 		goto failed_destroy_mutex;
 	}
-	memset(fbi->fb_start, 0, fbi->fb_size);
-	dev_info(fbi->dev, "fb %dk allocated\n", fbi->fb_size/1024);
 
+	/* memset the 1st framebuffer, or there may be dirty data in fb */
+	memset(fbi->fb_start, 0, fbi->fb_size / fbi->buffer_num);
+
+	if (!no_skipped_power_on) {
+		/*
+		 * in skipped power on sequence, if virtual display, just show black color;
+		 * if it's not virtual dispaly,  don't change the start address, so still
+		 * show the same logo as bootloader at the 2nd buffer.
+		 */
+		if (is_virtual_display) {
+			mmpfb_set_address(&info->var, fbi);
+		}
+	} else {
+		mmpfb_set_win(info);
+		mmpfb_set_address(&info->var, fbi);
+	}
+
+	dev_info(fbi->dev, "fb phys_addr 0x%lx, virt_addr 0x%p, size %dk\n",
+		(unsigned long)fbi->fb_start_dma,
+		fbi->fb_start, (fbi->fb_size >> 10));
+
+#ifndef CONFIG_PM_RUNTIME
 	/* fb power on */
 	if (modes_num > 0)
-		mmpfb_power(fbi, 1);
+		mmpfb_power(fbi, MMP_ON);
+#endif
 
 	ret = fb_info_setup(info, fbi);
 	if (ret < 0)
@@ -648,14 +978,24 @@ static int mmpfb_probe(struct platform_device *pdev)
 		goto failed_clear_info;
 	}
 
+	mmpfb_vsync_notify_init(fbi);
+
 	dev_info(fbi->dev, "loaded to /dev/fb%d <%s>.\n",
 		info->node, info->fix.id);
 
 #ifdef CONFIG_LOGO
-	if (fbi->fb_start) {
+	if ((fbi->fb_start) && (no_skipped_power_on)) {
 		fb_prepare_logo(info, 0);
 		fb_show_logo(info, 0);
 	}
+#endif
+	pm_runtime_enable(&pdev->dev);
+	pm_runtime_forbid(&pdev->dev);
+	no_skipped_power_on = 1;
+#if defined(CONFIG_SEC_DEBUG)
+	sec_getlog_supply_fbinfo(phys_to_virt(info->fix.smem_start),
+			info->var.xres_virtual, info->var.yres_virtual / fbi->buffer_num,
+			info->var.bits_per_pixel, fbi->buffer_num);
 #endif
 
 	return 0;
@@ -663,24 +1003,76 @@ static int mmpfb_probe(struct platform_device *pdev)
 failed_clear_info:
 	fb_info_clear(info);
 failed_free_buff:
-	dma_free_coherent(&pdev->dev, PAGE_ALIGN(fbi->fb_size), fbi->fb_start,
-		fbi->fb_start_dma);
+	fb_free_framebuffer(fbi->fb_start);
 failed_destroy_mutex:
 	mutex_destroy(&fbi->access_ok);
 failed:
-	dev_err(fbi->dev, "mmp-fb: frame buffer device init failed\n");
+	if (fbi)
+		dev_err(fbi->dev, "mmp-fb: frame buffer device init failed\n");
 
 	framebuffer_release(info);
 
 	return ret;
 }
 
+void mmpfb_shutdown(struct platform_device *pdev)
+{
+	struct mmpfb_info *fbi = platform_get_drvdata(pdev);
+	struct fb_info *info = fbi->fb_info;
+
+	pr_info("%s\n", __func__);
+	fb_set_suspend(info, 1);
+
+	mmpfb_power(fbi, MMP_OFF);
+}
+
+#if defined(CONFIG_PM_RUNTIME) || defined(CONFIG_PM_SLEEP)
+static int mmpfb_runtime_suspend(struct device *dev)
+{
+	struct platform_device *pdev = to_platform_device(dev);
+	struct mmpfb_info *fbi = platform_get_drvdata(pdev);
+	struct fb_info *info = fbi->fb_info;
+
+	fb_set_suspend(info, 1);
+
+	mmpfb_power(fbi, MMP_OFF);
+
+	dev_dbg(&pdev->dev, "mmpfb suspended\n");
+	return 0;
+}
+
+static int mmpfb_runtime_resume(struct device *dev)
+{
+	struct platform_device *pdev = to_platform_device(dev);
+	struct mmpfb_info *fbi = platform_get_drvdata(pdev);
+	struct fb_info *info = fbi->fb_info;
+
+	if (no_skipped_power_on)
+		mmpfb_power(fbi, MMP_ON);
+	else
+		mmpfb_power(fbi, MMP_ON_REDUCED);
+
+	fb_set_suspend(info, 0);
+
+	dev_dbg(&pdev->dev, "mmpfb resumed.\n");
+	return 0;
+}
+#endif
+
+const struct dev_pm_ops mmpfb_pm_ops = {
+	SET_RUNTIME_PM_OPS(mmpfb_runtime_suspend,
+		mmpfb_runtime_resume, NULL)
+};
+
 static struct platform_driver mmpfb_driver = {
 	.driver		= {
 		.name	= "mmp-fb",
 		.owner	= THIS_MODULE,
+		.pm	= &mmpfb_pm_ops,
+		.of_match_table = of_match_ptr(mmp_fb_dt_match),
 	},
 	.probe		= mmpfb_probe,
+	.shutdown	= mmpfb_shutdown,
 };
 
 static int mmpfb_init(void)

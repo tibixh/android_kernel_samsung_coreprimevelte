@@ -491,7 +491,7 @@ static int snd_compress_check_input(struct snd_compr_params *params)
 {
 	/* first let's check the buffer parameter's */
 	if (params->buffer.fragment_size == 0 ||
-			params->buffer.fragments > SIZE_MAX / params->buffer.fragment_size)
+			params->buffer.fragments > INT_MAX / params->buffer.fragment_size)
 		return -EINVAL;
 
 	/* now codec parameters */
@@ -867,6 +867,9 @@ static int snd_compress_dev_register(struct snd_device *device)
 	if (snd_BUG_ON(!device || !device->device_data))
 		return -EBADFD;
 	compr = device->device_data;
+
+	if (snd_BUG_ON(compr->card->number < 0 || compr->card->number >= SNDRV_CARDS))
+        return -EBADFD;
 
 	sprintf(str, "comprC%iD%i", compr->card->number, compr->device);
 	pr_debug("reg %s for device %s, direction %d\n", str, compr->name,

@@ -671,6 +671,7 @@ static int gs_start_io(struct gs_port *port)
 {
 	struct list_head	*head = &port->read_pool;
 	struct usb_ep		*ep = port->port_usb->out;
+	struct gserial		*gser = port->port_usb;
 	int			status;
 	unsigned		started;
 
@@ -685,7 +686,7 @@ static int gs_start_io(struct gs_port *port)
 	if (status)
 		return status;
 
-	status = gs_alloc_requests(port->port_usb->in, &port->write_pool,
+	status = gs_alloc_requests(gser->in, &port->write_pool,
 			gs_write_complete, &port->write_allocated);
 	if (status) {
 		gs_free_requests(ep, head, &port->read_allocated);
@@ -701,7 +702,7 @@ static int gs_start_io(struct gs_port *port)
 		tty_wakeup(port->port.tty);
 	} else {
 		gs_free_requests(ep, head, &port->read_allocated);
-		gs_free_requests(port->port_usb->in, &port->write_pool,
+		gs_free_requests(gser->in, &port->write_pool,
 			&port->write_allocated);
 		status = -EIO;
 	}
@@ -1126,6 +1127,7 @@ int gserial_alloc_line(unsigned char *line_num)
 
 	tty_dev = tty_port_register_device(&ports[port_num].port->port,
 			gs_tty_driver, port_num, NULL);
+
 	if (IS_ERR(tty_dev)) {
 		struct gs_port	*port;
 		pr_err("%s: failed to register tty for port %d, err %ld\n",

@@ -142,6 +142,9 @@ static inline bool mmc_op_multi(u32 opcode)
 #define R1_EXCEPTION_EVENT	(1 << 6)	/* sr, a */
 #define R1_APP_CMD		(1 << 5)	/* sr, c */
 
+#define R1_ERROR_BITS  0xFDFF8008      /* all error bits */
+#define R1_CMD13_ERROR_BITS    0xCDF98000      /* all error bits for CMD13 */
+
 #define R1_STATE_IDLE	0
 #define R1_STATE_READY	1
 #define R1_STATE_IDENT	2
@@ -280,6 +283,7 @@ struct _mmc_csd {
 #define EXT_CSD_EXP_EVENTS_STATUS	54	/* RO, 2 bytes */
 #define EXT_CSD_EXP_EVENTS_CTRL		56	/* R/W, 2 bytes */
 #define EXT_CSD_DATA_SECTOR_SIZE	61	/* R */
+#define EXT_CSD_VENDOR_SPECIFIC_FIELD   64      /* RO, 64bytes */
 #define EXT_CSD_GP_SIZE_MULT		143	/* R/W */
 #define EXT_CSD_PARTITION_ATTRIBUTE	156	/* R/W */
 #define EXT_CSD_PARTITION_SUPPORT	160	/* RO */
@@ -331,6 +335,14 @@ struct _mmc_csd {
 #define EXT_CSD_MAX_PACKED_READS	501	/* RO */
 #define EXT_CSD_BKOPS_SUPPORT		502	/* RO */
 #define EXT_CSD_HPI_FEATURES		503	/* RO */
+
+/* additional : eMMC v5.0 or later Only */
+#define EXT_CSD_DEVICE_LIFE_TIME_EST_TYPE_B	269	/* RO */
+#define EXT_CSD_DEVICE_LIFE_TIME_EST_TYPE_A	268	/* RO */
+#define EXT_CSD_PRE_EOL_INFO			267	/* RO */
+#define EXT_CSD_OPTIMAL_TRIM_UNIT_SIZE		264	/* RO */
+#define EXT_CSD_DEVICE_VERSION			262	/* RO, 2Byte */
+#define EXT_CSD_FIRMWARE_VERSION		254	/* RO, 8Byte */
 
 /*
  * EXT_CSD field definitions

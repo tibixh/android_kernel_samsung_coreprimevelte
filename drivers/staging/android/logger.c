@@ -33,6 +33,12 @@
 
 #include <asm/ioctls.h>
 
+#ifdef CONFIG_SEC_DEBUG
+#include <linux/rtc.h>
+#include <linux/sec-debug.h>
+#include <linux/sec-bsp.h>
+#endif
+
 /**
  * struct logger_log - represents a specific log, such as 'main' or 'radio'
  * @buffer:	The actual ring buffer
@@ -454,7 +460,36 @@ static ssize_t do_write_log_from_user(struct logger_log *log,
 			 * message corruption from missing fragments.
 			 */
 			return -EFAULT;
-
+#ifdef CONFIG_SEC_DEBUG
+	/* print as kernel log if the log string starts with "!@" */
+	if (count >= 2) {
+		if (log->buffer[log->w_off] == '!'
+		    && log->buffer[logger_offset(log, log->w_off + 1)] == '@') {
+			char tmp[256];
+			int i;
+			for (i = 0; i < min(count, sizeof(tmp) - 1); i++)
+				tmp[i] =
+				    log->buffer[logger_offset \
+						(log, log->w_off + i)];
+			tmp[i] = '\0';
+			if (!strstr(tmp, "!@Sync"))
+				printk(KERN_INFO "%s\n", tmp);
+			else {
+				struct timespec ts;
+				struct rtc_time tm;
+				getnstimeofday(&ts);
+				rtc_time_to_tm(ts.tv_sec, &tm);
+				printk(KERN_INFO "[%d-%02d-%02d %02d:%02d:%02d.%09lu]%s\n",
+					tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+					tm.tm_hour, tm.tm_min, tm.tm_sec, ts.tv_nsec, tmp);
+			}
+#ifdef CONFIG_SEC_BSP
+			if (strncmp(tmp, "!@Boot", 6) == 0)
+				sec_boot_stat_add(tmp);
+#endif
+		}
+	}
+#endif
 	log->w_off = logger_offset(log, log->w_off + count);
 
 	return count;
@@ -742,6 +777,21 @@ static const struct file_operations logger_fops = {
 	.release = logger_release,
 };
 
+#ifdef CONFIG_PXA_RAMDUMP
+#include <linux/ramdump.h>
+static void logcat_ramdump_register(struct logger_log *log)
+{
+	/* Name is limited to 8 chars: skip the "log_" prefix and assuming
+	log name will not be over 8 chars then */
+	ramdump_attach_cbuffer(log->misc.name+4,
+		(void **)&log->buffer,
+		(unsigned *)&log->size,
+		(unsigned *)&log->head,
+		sizeof(u8));
+}
+#endif
+
+
 /*
  * Log size must must be a power of two, and greater than
  * (LOGGER_ENTRY_MAX_PAYLOAD + sizeof(struct logger_entry)).
@@ -752,7 +802,14 @@ static int __init create_log(char *log_name, int size)
 	struct logger_log *log;
 	unsigned char *buffer;
 
+#ifdef CONFIG_SEC_DEBUG
+	if (sec_debug_level.uint_val == 1)
+		buffer = kmalloc(size, GFP_KERNEL);
+	else
+		buffer = vmalloc(size);
+#else
 	buffer = vmalloc(size);
+#endif
 	if (buffer == NULL)
 		return -ENOMEM;
 
@@ -791,8 +848,16 @@ static int __init create_log(char *log_name, int size)
 		goto out_free_log;
 	}
 
+#ifdef CONFIG_PXA_RAMDUMP
+	logcat_ramdump_register(log);
+#endif
+
 	pr_info("created %luK log '%s'\n",
 		(unsigned long) log->size >> 10, log->misc.name);
+
+#ifdef CONFIG_SEC_DEBUG
+	sec_getlog_supply_loggerinfo(buffer, log->misc.name);
+#endif
 
 	return 0;
 
@@ -800,7 +865,14 @@ out_free_log:
 	kfree(log);
 
 out_free_buffer:
+#ifdef CONFIG_SEC_DEBUG
+	if (sec_debug_level.uint_val == 1)
+		kfree(buffer);
+	else
+		vfree(buffer);
+#else
 	vfree(buffer);
+#endif
 	return ret;
 }
 
@@ -808,7 +880,14 @@ static int __init logger_init(void)
 {
 	int ret;
 
+#ifdef CONFIG_SEC_DEBUG
+	if (sec_debug_level.uint_val == 1)
+		ret = create_log(LOGGER_LOG_MAIN, 2048*1024);
+	else
+		ret = create_log(LOGGER_LOG_MAIN, 256*1024);
+#else
 	ret = create_log(LOGGER_LOG_MAIN, 256*1024);
+#endif
 	if (unlikely(ret))
 		goto out;
 
@@ -816,7 +895,14 @@ static int __init logger_init(void)
 	if (unlikely(ret))
 		goto out;
 
+#ifdef CONFIG_SEC_DEBUG
+	if (sec_debug_level.uint_val == 1)
+		ret = create_log(LOGGER_LOG_RADIO, 2048*1024);
+	else
+		ret = create_log(LOGGER_LOG_RADIO, 256*1024);
+#else
 	ret = create_log(LOGGER_LOG_RADIO, 256*1024);
+#endif
 	if (unlikely(ret))
 		goto out;
 
@@ -835,7 +921,14 @@ static void __exit logger_exit(void)
 	list_for_each_entry_safe(current_log, next_log, &log_list, logs) {
 		/* we have to delete all the entry inside log_list */
 		misc_deregister(&current_log->misc);
+#ifdef CONFIG_SEC_DEBUG
+		if (sec_debug_level.uint_val == 1)
+			kfree(current_log->buffer);
+		else
+			vfree(current_log->buffer);
+#else
 		vfree(current_log->buffer);
+#endif
 		kfree(current_log->misc.name);
 		list_del(&current_log->logs);
 		kfree(current_log);

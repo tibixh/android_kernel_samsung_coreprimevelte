@@ -75,6 +75,23 @@ config BATTERY_88PM860X
 	help
 	  Say Y here to enable battery monitor for Marvell 88PM860x chip.
 
+config SW_BATTERY_88PM80X
+	tristate "Marvell 88PM80x software battery driver"
+	depends on MFD_88PM800
+	help
+	  Say Y here to enable software battery monitor for Marvell 88PM80x chip.
+	  This driver uses the ADC function of 88PM80x. The capacity of the
+	  battery is calculated via the voltage.
+
+config BATTERY_88PM830
+	tristate "Marvell 88PM830 battery"
+	depends on MFD_88PM830
+	help
+	  Say Y here to enable battery monitor for Marvell 88PM830 chip.
+	  This driver uses the ADC and Columb counter to get
+	  voltage and current.
+	  The capacity of the battery is calculated via OCV and Culomb counter.
+
 config BATTERY_DS2760
 	tristate "DS2760 battery driver (HP iPAQ & others)"
 	depends on W1 && W1_SLAVE_DS2760
@@ -276,6 +293,15 @@ config CHARGER_MAX8903
 	  pins based on the status of charger connections with interrupt
 	  handlers.
 
+config CHARGER_88PM830
+	tristate "Marvell 88PM830 Charger"
+	depends on MFD_88PM830
+	help
+	  Say Y to enable support for the 88PM830 charger interface.
+	  The driver supports controlling charger-enable and current-limit
+	  with charger connections by interrupt handling.
+	  It can be used for usb/ac adapater connection.
+
 config CHARGER_TWL4030
 	tristate "OMAP TWL4030 BCI charger driver"
 	depends on TWL4030_CORE
@@ -390,6 +416,7 @@ config BATTERY_GOLDFISH
 	  Goldfish emulator.
 
 source "drivers/power/reset/Kconfig"
+source "drivers/power/marvell/power_domain/Kconfig"
 
 endif # POWER_SUPPLY
 

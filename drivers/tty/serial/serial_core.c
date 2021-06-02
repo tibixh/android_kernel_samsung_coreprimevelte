@@ -89,6 +89,9 @@ static void __uart_start(struct tty_struct *tty)
 	struct uart_state *state = tty->driver_data;
 	struct uart_port *port = state->uart_port;
 
+	if (port->ops->wake_peer)
+		port->ops->wake_peer(port);
+
 	if (!uart_circ_empty(&state->xmit) && state->xmit.buf &&
 	    !tty->stopped && !tty->hw_stopped)
 		port->ops->start_tx(port);
@@ -155,7 +158,6 @@ static int uart_port_startup(struct tty_struct *tty, struct uart_state *state,
 	if (retval == 0) {
 		if (uart_console(uport) && uport->cons->cflag) {
 			tty->termios.c_cflag = uport->cons->cflag;
-			uport->cons->cflag = 0;
 		}
 		/*
 		 * Initialise the hardware port settings.
@@ -2021,16 +2023,17 @@ int uart_resume_port(struct uart_driver *drv, struct uart_port *uport)
 	 */
 	if (uart_console(uport)) {
 		/*
-		 * First try to use the console cflag setting.
+		 * First try to use the tty termios setting.
 		 */
-		memset(&termios, 0, sizeof(struct ktermios));
-		termios.c_cflag = uport->cons->cflag;
-
-		/*
-		 * If that's unset, use the tty termios setting.
-		 */
-		if (port->tty && termios.c_cflag == 0)
+		if (port->tty)
 			termios = port->tty->termios;
+		else {
+			/*
+			 * If unavailable, use the console cflag setting.
+			 */
+			memset(&termios, 0, sizeof(struct ktermios));
+			termios.c_cflag = uport->cons->cflag;
+		}
 
 		if (console_suspend_enabled)
 			uart_change_pm(state, UART_PM_STATE_ON);

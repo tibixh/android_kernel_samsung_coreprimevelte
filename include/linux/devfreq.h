@@ -16,6 +16,7 @@
 #include <linux/device.h>
 #include <linux/notifier.h>
 #include <linux/pm_opp.h>
+#include <linux/pm_qos.h>
 
 #define DEVFREQ_NAME_LEN 16
 
@@ -41,6 +42,7 @@ struct devfreq_dev_status {
 	unsigned long total_time;
 	unsigned long busy_time;
 	unsigned long current_frequency;
+	int throughput;
 	void *private_data;
 };
 
@@ -53,10 +55,30 @@ struct devfreq_dev_status {
 #define DEVFREQ_FLAG_LEAST_UPPER_BOUND		0x1
 
 /**
+ * struct devfreq_pm_qos_table - An PM QoS requiement entry for devfreq dev.
+ * @freq:		Lowest frequency to meet the QoS requirement
+ *			represented by qos_value. If freq=0, it means that
+ *			this element is the last in the array.
+ * @qos_value:		The qos value defined in pm_qos_params.h
+ *
+ * Note that the array of devfreq_pm_qos_table should be sorted by freq
+ * in the ascending order except for the last element, which should be 0.
+ */
+struct devfreq_pm_qos_table {
+	unsigned long freq; /* 0 if this is the last element */
+	int qos_value;
+};
+
+/**
  * struct devfreq_dev_profile - Devfreq's user device profile
  * @initial_freq:	The operating frequency when devfreq_add_device() is
  *			called.
  * @polling_ms:		The polling interval in ms. 0 disables polling.
+ * @qos_type:		QoS type (defined in pm_qos_params.h)
+ *			0 (PM_QOS_RESERVED) if not used.
+ * @qos_list:		Array of QoS requirements ending with .freq = 0
+ *			NULL if not used. It should be either NULL or
+ *			have a length > 1 with a first element effective.
  * @target:		The device should set its operating frequency at
  *			freq or lowest-upper-than-freq value. If freq is
  *			higher than any operable frequency, set maximum.
@@ -75,10 +97,18 @@ struct devfreq_dev_status {
  *			this is the time to unregister it.
  * @freq_table:	Optional list of frequencies to support statistics.
  * @max_state:	The size of freq_table.
+ *
+ * Note that the array of qos_list should be sorted by freq
+ * in the ascending order.
  */
 struct devfreq_dev_profile {
+	char *name;
 	unsigned long initial_freq;
 	unsigned int polling_ms;
+	int min_qos_type;
+	int max_qos_type;
+	struct pm_qos_request qos_req_min;
+	struct pm_qos_request qos_req_max;
 
 	int (*target)(struct device *dev, unsigned long *freq, u32 flags);
 	int (*get_dev_status)(struct device *dev,
@@ -135,7 +165,11 @@ struct devfreq_governor {
  *		touch this.
  * @min_freq:	Limit minimum frequency requested by user (0: none)
  * @max_freq:	Limit maximum frequency requested by user (0: none)
- * @stop_polling:	 devfreq polling status of a device.
+ * @qos_min_nb:	notifier block used to notify pm qos_min requests
+ * @qos_max_nb:	notifier block used to notify pm qos_max requests
+ * @qos_min_freq:	Limit minimum frequency requested by QoS
+ * @qos_max_freq:	Limit maximum frequency requested by QoS
+ * @stop_polling:	devfreq polling status of a device.
  * @total_trans:	Number of devfreq transitions
  * @trans_table:	Statistics of devfreq transitions
  * @time_in_state:	Statistics of devfreq states
@@ -166,6 +200,11 @@ struct devfreq {
 
 	unsigned long min_freq;
 	unsigned long max_freq;
+	struct notifier_block qos_min_nb;
+	struct notifier_block qos_max_nb;
+	unsigned long qos_min_freq;
+	unsigned long qos_max_freq;
+
 	bool stop_polling;
 
 	/* information for device frequency transition */
@@ -174,6 +213,35 @@ struct devfreq {
 	unsigned long *time_in_state;
 	unsigned long last_stat_updated;
 };
+
+/* frequency table helpers */
+enum devfreq_device_id {
+	DEVFREQ_DDR = 0,
+	DEVFREQ_VPU_BASE,
+	DEVFREQ_VPU_0 = DEVFREQ_VPU_BASE,
+	DEVFREQ_VPU_1,
+	DEVFREQ_GPU_3D,
+	DEVFREQ_GPU_SH,
+	DEVFREQ_GPU_2D,
+	DEVFREQ_MAX_ID,
+};
+
+#define DEVFREQ_TABLE_END	(~1)
+struct devfreq_frequency_table {
+	unsigned int index;
+	unsigned int mode;
+	unsigned int frequency;
+};
+
+struct devfreq_dev_freq_info {
+	struct devfreq_frequency_table *tbl;
+};
+
+void devfreq_frequency_table_register(struct devfreq_frequency_table *table,
+				unsigned int dev_id);
+
+struct devfreq_frequency_table *devfreq_frequency_get_table(
+		unsigned int dev_id);
 
 #if defined(CONFIG_PM_DEVFREQ)
 extern struct devfreq *devfreq_add_device(struct device *dev,
@@ -213,6 +281,34 @@ struct devfreq_simple_ondemand_data {
 	unsigned int downdifferential;
 };
 #endif
+
+#if IS_ENABLED(CONFIG_DEVFREQ_GOV_THROUGHPUT)
+struct throughput_threshold {
+	unsigned int up;
+	unsigned int down;
+};
+
+struct devfreq_throughput_data {
+	unsigned int upthreshold;
+	unsigned int downdifferential;
+	u32 table_len;
+	u32 *freq_table;        /* unit Khz */
+	struct throughput_threshold *throughput_table;
+};
+#endif
+
+/* calculate workload according to busy and total time, unit percent */
+static inline unsigned int cal_workload(unsigned long busy_time,
+	unsigned long total_time)
+{
+	u64 tmp0, tmp1;
+
+	if (!total_time || !busy_time)
+		return 0;
+	tmp0 = busy_time * 100;
+	tmp1 = div_u64(tmp0, total_time);
+	return (unsigned int)tmp1;
+}
 
 #else /* !CONFIG_PM_DEVFREQ */
 static inline struct devfreq *devfreq_add_device(struct device *dev,

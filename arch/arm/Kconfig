@@ -585,15 +585,17 @@ config ARCH_MMP
 	bool "Marvell PXA168/910/MMP2"
 	depends on MMU
 	select ARCH_REQUIRE_GPIOLIB
+	select ARCH_HAS_CPUFREQ
 	select CLKDEV_LOOKUP
 	select GENERIC_ALLOCATOR
 	select GENERIC_CLOCKEVENTS
-	select GPIO_PXA
+	select PM_GENERIC_DOMAINS
 	select IRQ_DOMAIN
 	select MULTI_IRQ_HANDLER
 	select PINCTRL
 	select PLAT_PXA
 	select SPARSE_IRQ
+	select NEED_MACH_MEMORY_H
 	help
 	  Support for Marvell's PXA168/PXA910(MMP) and MMP2 processor line.
 
@@ -1350,6 +1352,19 @@ config ARM_ERRATA_764369
 	  relevant cache maintenance functions and sets a specific bit
 	  in the diagnostic control register of the SCU.
 
+config ARM_ERRATA_794322
+	bool "ARM errata: An instruction fetch can be allocated into the L2 cache after the cache is disabled"
+	depends on CPU_V7
+	help
+	  This option enables the workaround for erratum 794322
+	  affecting Cortex-A7 MPCore r0p2, r0p3 with an L2 cache. The
+	  SCTLR.C bit controls when data can be allocated to data and
+	  unified caches. On a Cortex-A7 processor, instruction fetches
+	  can cause lines to be allocated to the L2 cache when the C bit
+	  is set to 1. Because of this erratum, an instruction fetch
+	  might cause an allocation to the L2 cache when the C bit is
+	  set to 0.
+
 config PL310_ERRATA_769419
 	bool "PL310 errata: no automatic Store Buffer drain"
 	depends on CACHE_L2X0
@@ -1390,6 +1405,45 @@ config ARM_ERRATA_773022
 	  (up to r0p4) erratum. In certain rare sequences of code, the
 	  loop buffer may deliver incorrect instructions. This
 	  workaround disables the loop buffer to avoid the erratum.
+
+config ARM_ERRATA_802022
+	bool "ARM errata: last duplicate tag may become un-sync with L1 tag after exiting MP shutdown mode"
+	depends on CPU_V7 && !ARCH_NEEDS_CPU_IDLE_COUPLED
+	help
+	 This option enables the fix for erratum 802022 affecting
+	 Cortex-A7 MPCore r0p0, r0p1, r0p2, r0p3, r0p4. A duplicate tag
+	 update for CPU A gets priority over the last duplicate tag
+	 invalidate for CPU B during CPU B's automatic invalidation process.
+	 Normally CPU B's tag invalidation will pause and then continue,
+	 but for the last tag entry it will pause and then forget it was
+	 invalidating entries because the index counter has reached the
+	 maximum value.
+	 This fix to make sure all CPUs exit shutdown mode when
+	 exit MP shutdown mode before dcache of any core is enabled.
+
+config ARM_ERRATA_814220
+	bool "ARM errata: Cache maintenance by set/way operations can execute out of order"
+	depends on CPU_V7
+	help
+	  This option enables the fix for erratum 814220 which affecting
+	  Cortex-A7 MPCore r0p2, r0p3, r0p4 and r0p5. The cache maintenance by set/way operation
+	  between different levels can execute out of order. So there will be issues
+	  when L2 flush to L3 complete before L1 flush to L2. Then L2 will contain dirty data
+	  which is not flushed to L3.
+	  This fix is to add dsb between different cache levels. It will make sure
+	  the flush of previous level finish before next level start.
+
+config ARM_ERRATA_784420
+	bool "ARM errata: CA15's speculative instruction fetches with MMU disabled"
+	depends on CPU_V7
+	help
+	  This option enables handling for "CA15's speculative instruction
+	  fetches with MMU disabled might not comply with architectural requirements".
+	  In case at least one stage of MMU and branch prediction were enabled,
+	  and then MMU has been disabled, branch prediction may cause illegal
+	  speculations, which is a violation of architecture requirements.
+	  Conclusion: when disabling MMU software disable branch prediction
+	  by setting SCTLR[Z]=0 until MMU is re-enabled.
 
 endmenu
 
@@ -1523,6 +1577,109 @@ config SCHED_SMT
 	  MultiThreading at a cost of slightly increased overhead in some
 	  places. If unsure say N here.
 
+config DISABLE_CPU_SCHED_DOMAIN_BALANCE
+	bool "(EXPERIMENTAL) Disable CPU level scheduler load-balancing"
+	help
+	  Disables scheduler load-balancing at CPU sched domain level.
+
+config SCHED_HMP
+	bool "(EXPERIMENTAL) Heterogenous multiprocessor scheduling"
+	depends on DISABLE_CPU_SCHED_DOMAIN_BALANCE && SCHED_MC && FAIR_GROUP_SCHED && !SCHED_AUTOGROUP
+	help
+	  Experimental scheduler optimizations for heterogeneous platforms.
+	  Attempts to introspectively select task affinity to optimize power
+	  and performance. Basic support for multiple (>2) cpu types is in place,
+	  but it has only been tested with two types of cpus.
+	  There is currently no support for migration of task groups, hence
+	  !SCHED_AUTOGROUP. Furthermore, normal load-balancing must be disabled
+	  between cpus of different type (DISABLE_CPU_SCHED_DOMAIN_BALANCE).
+	  When turned on, this option adds sys/kernel/hmp directory which
+	  contains the following files:
+	  up_threshold - the load average threshold used for up migration
+	                 (0 - 1023)
+	  down_threshold - the load average threshold used for down migration
+	                 (0 - 1023)
+	  hmp_domains - a list of cpumasks for the present HMP domains,
+	                starting with the 'biggest' and ending with the
+	                'smallest'.
+	  Note that both the threshold files can be written at runtime to
+	  control scheduler behaviour.
+
+config SCHED_HMP_PRIO_FILTER
+	bool "(EXPERIMENTAL) Filter HMP migrations by task priority"
+	depends on SCHED_HMP
+	help
+	  Enables task priority based HMP migration filter. Any task with
+	  a NICE value above the threshold will always be on low-power cpus
+	  with less compute capacity.
+
+config SCHED_HMP_PRIO_FILTER_VAL
+	int "NICE priority threshold"
+	default 5
+	depends on SCHED_HMP_PRIO_FILTER
+
+config HMP_FAST_CPU_MASK
+	string "HMP scheduler fast CPU mask"
+	depends on SCHED_HMP
+	help
+          Leave empty to use device tree information.
+	  Specify the cpuids of the fast CPUs in the system as a list string,
+	  e.g. cpuid 0+1 should be specified as 0-1.
+
+config HMP_SLOW_CPU_MASK
+	string "HMP scheduler slow CPU mask"
+	depends on SCHED_HMP
+	help
+	  Leave empty to use device tree information.
+	  Specify the cpuids of the slow CPUs in the system as a list string,
+	  e.g. cpuid 0+1 should be specified as 0-1.
+
+config HMP_VARIABLE_SCALE
+	bool "Allows changing the load tracking scale through sysfs"
+	depends on SCHED_HMP
+	help
+	  When turned on, this option exports the load average period value
+	  for the load tracking patches through sysfs.
+	  The values can be modified to change the rate of load accumulation
+	  used for HMP migration. 'load_avg_period_ms' is the time in ms to
+	  reach a load average of 0.5 for an idle task of 0 load average
+	  ratio which becomes 100% busy.
+	  For example, with load_avg_period_ms = 128 and up_threshold = 512,
+	  a running task with a load of 0 will be migrated to a bigger CPU after
+	  128ms, because after 128ms its load_avg_ratio is 0.5 and the real
+	  up_threshold is 0.5.
+	  This patch has the same behavior as changing the Y of the load
+	  average computation to
+	        (1002/1024)^(LOAD_AVG_PERIOD/load_avg_period_ms)
+	  but removes intermediate overflows in computation.
+
+config HMP_FREQUENCY_INVARIANT_SCALE
+	bool "(EXPERIMENTAL) Frequency-Invariant Tracked Load for HMP"
+	depends on SCHED_HMP && CPU_FREQ
+	help
+	  Scales the current load contribution in line with the frequency
+	  of the CPU that the task was executed on.
+	  In this version, we use a simple linear scale derived from the
+	  maximum frequency reported by CPUFreq.
+	  Restricting tracked load to be scaled by the CPU's frequency
+	  represents the consumption of possible compute capacity
+	  (rather than consumption of actual instantaneous capacity as
+	  normal) and allows the HMP migration's simple threshold
+	  migration strategy to interact more predictably with CPUFreq's
+	  asynchronous compute capacity changes.
+
+config SCHED_HMP_LITTLE_PACKING
+	bool "Small task packing for HMP"
+	depends on SCHED_HMP
+	default n
+	help
+	  Allows the HMP Scheduler to pack small tasks into CPUs in the
+	  smallest HMP domain.
+	  Controlled by two sysfs files in sys/kernel/hmp.
+	  packing_enable: 1 to enable, 0 to disable packing. Default 1.
+	  packing_limit: runqueue load ratio where a RQ is considered
+	    to be full. Default is NICE_0_LOAD * 9/8.
+
 config HAVE_ARM_SCU
 	bool
 	help
@@ -1601,6 +1758,19 @@ config PAGE_OFFSET
 	default 0x40000000 if VMSPLIT_1G
 	default 0x80000000 if VMSPLIT_2G
 	default 0xC0000000
+
+config TEXT_OFFSET_OVERRIDE
+	bool "Enable CONFIG_TEXT_OFFSET"
+	default n
+	help
+	  It defines the start of .text of kernel.
+	  Some SOCes may not start from 0x8000, and it want
+	  to reserve a memory region. So select this config.
+
+config TEXT_OFFSET
+	hex "Specific kernel TEXT offset from PAGE_OFFSET"
+	depends on TEXT_OFFSET_OVERRIDE
+	default 0x00008000
 
 config NR_CPUS
 	int "Maximum number of CPUs (2-32)"
@@ -1913,6 +2083,15 @@ config XEN
 	help
 	  Say Y if you want to run Linux in a Virtual Machine on Xen on ARM.
 
+config ARM_FLUSH_CONSOLE_ON_RESTART
+	bool "Force flush the console on restart"
+	help
+	  If the console is locked while the system is rebooted, the messages
+	  in the temporary logbuffer would not have propogated to all the
+	  console drivers. This option forces the console lock to be
+	  released if it failed to be acquired, which will cause all the
+	  pending messages to be flushed.
+
 endmenu
 
 menu "Boot options"
@@ -1941,6 +2120,21 @@ config DEPRECATED_PARAM_STRUCT
 	help
 	  This was deprecated in 2001 and announced to live on for 5 years.
 	  Some old boot loaders still use this way.
+
+config BUILD_ARM_APPENDED_DTB_IMAGE
+	bool "Build a concatenated zImage/dtb by default"
+	depends on OF
+	help
+	  Enabling this option will cause a concatenated zImage and list of
+	  DTBs to be built by default (instead of a standalone zImage.)
+	  The image will built in arch/arm/boot/zImage-dtb
+
+config BUILD_ARM_APPENDED_DTB_IMAGE_NAMES
+	string "Default dtb names"
+	depends on BUILD_ARM_APPENDED_DTB_IMAGE
+	help
+	  Space separated list of names of dtbs to append when
+	  building a concatenated zImage-dtb.
 
 # Compressed boot loader in ROM.  Yes, we really want to ask about
 # TEXT and BSS so we preserve their values in the config files.
@@ -2174,6 +2368,7 @@ source "drivers/cpufreq/Kconfig"
 endif
 
 source "drivers/cpuidle/Kconfig"
+source "drivers/cpuhotplug/Kconfig"
 
 endmenu
 

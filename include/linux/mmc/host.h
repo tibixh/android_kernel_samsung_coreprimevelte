@@ -15,9 +15,24 @@
 #include <linux/sched.h>
 #include <linux/device.h>
 #include <linux/fault-inject.h>
+#include <linux/wakelock.h>
 
 #include <linux/mmc/core.h>
 #include <linux/mmc/pm.h>
+#define _MMC_SAFE_ACCESS_
+
+enum timing_type {
+	MMC_TIMING_LEGACY = 0, /* 0~25MHz */
+	MMC_TIMING_UHS_SDR12, /* 0~25MHz */
+	MMC_TIMING_MMC_HS, /* 52MHz */
+	MMC_TIMING_SD_HS, /* 50MHz */
+	MMC_TIMING_UHS_SDR25, /* 50MHz */
+	MMC_TIMING_UHS_SDR50,   /* 100MHz */
+	MMC_TIMING_UHS_SDR104, /* 208MHz */
+	MMC_TIMING_UHS_DDR50, /* 50MHz */
+	MMC_TIMING_MMC_HS200, /* 200MHz */
+	MMC_TIMING_MAX,
+};
 
 struct mmc_ios {
 	unsigned int	clock;			/* clock rate */
@@ -49,16 +64,7 @@ struct mmc_ios {
 #define MMC_BUS_WIDTH_8		3
 
 	unsigned char	timing;			/* timing specification used */
-
-#define MMC_TIMING_LEGACY	0
-#define MMC_TIMING_MMC_HS	1
-#define MMC_TIMING_SD_HS	2
-#define MMC_TIMING_UHS_SDR12	3
-#define MMC_TIMING_UHS_SDR25	4
-#define MMC_TIMING_UHS_SDR50	5
-#define MMC_TIMING_UHS_SDR104	6
-#define MMC_TIMING_UHS_DDR50	7
-#define MMC_TIMING_MMC_HS200	8
+	unsigned char	old_timing;		/* old timing specification used */
 
 #define MMC_SDR_MODE		0
 #define MMC_1_2V_DDR_MODE	1
@@ -71,6 +77,7 @@ struct mmc_ios {
 #define MMC_SIGNAL_VOLTAGE_330	0
 #define MMC_SIGNAL_VOLTAGE_180	1
 #define MMC_SIGNAL_VOLTAGE_120	2
+#define MMC_SIGNAL_VOLTAGE_OFF	3
 
 	unsigned char	drv_type;		/* driver type (A, B, C, D) */
 
@@ -139,6 +146,8 @@ struct mmc_host_ops {
 	int	(*select_drive_strength)(unsigned int max_dtr, int host_drv, int card_drv);
 	void	(*hw_reset)(struct mmc_host *host);
 	void	(*card_event)(struct mmc_host *host);
+	int	(*pre_busy_check)(struct mmc_host *mmc, int signal_votage);
+	int	(*post_busy_check)(struct mmc_host *mmc, int signal_votage);
 };
 
 struct mmc_card;
@@ -194,6 +203,8 @@ struct mmc_supply {
 	struct regulator *vmmc;		/* Card power supply */
 	struct regulator *vqmmc;	/* Optional Vccq supply */
 };
+
+#define FLAG_NO_SUSPEND_IF_BUSBUSY	(0x1)
 
 struct mmc_host {
 	struct device		*parent;
@@ -282,6 +293,25 @@ struct mmc_host {
 				 MMC_CAP2_PACKED_WR)
 #define MMC_CAP2_NO_PRESCAN_POWERUP (1 << 14)	/* Don't power up before scan */
 #define MMC_CAP2_SANITIZE	(1 << 15)		/* Support Sanitize */
+#define MMC_CAP2_SKIP_MMC	(1 << 16)	/* If don't need to support emmc */
+#define MMC_CAP2_SKIP_SD	(1 << 17)	/* If don't need to support sd card */
+#define MMC_CAP2_SKIP_SDIO	(1 << 18)	/* If don't need to support sdio */
+
+/*
+ * disable the block devices' pre/post feature
+ * So that the next data transfer will only be perpared/triggered
+ * when previous transfer has been totally finished
+*/
+#define MMC_CAP2_DISABLE_BLK_ASYNC             (1 << 20)
+/*
+ * controller could disable card scanning in probe procedure for
+ * some cases, eg, for Marvell 8787 SDIO card in phone system
+ */
+#define MMC_CAP2_DISABLE_PROBE_CDSCAN		(1 << 21)
+#define MMC_CAP2_BUS_AUTO_CLK_GATE		(1 << 22)   /* host can auto gate bus clk */
+#define MMC_CAP2_NO_VOLTAGE_SWITCH		(1 << 23)   /* Don't need voltage switch */
+#define MMC_CAP2_BKOPS_EN			(1 << 24)   /* Enable bkops from host side */
+#define MMC_CAP2_SECURE_ERASE_EN		(1 << 31)
 
 	mmc_pm_flag_t		pm_caps;	/* supported pm features */
 
@@ -329,23 +359,33 @@ struct mmc_host {
 	int			claim_cnt;	/* "claim" nesting count */
 
 	struct delayed_work	detect;
+	struct wake_lock	detect_wake_lock;
+	void                    *detect_complete;
 	int			detect_change;	/* card detect flag */
+	bool			detect_tuning;	/* detect card only for sdh tuning purpose */
 	struct mmc_slot		slot;
 
 	const struct mmc_bus_ops *bus_ops;	/* current bus driver */
 	unsigned int		bus_refs;	/* reference counter */
 
+	unsigned int		bus_resume_flags;
+#define MMC_BUSRESUME_MANUAL_RESUME	(1 << 0)
+#define MMC_BUSRESUME_NEEDS_RESUME	(1 << 1)
+
 	unsigned int		sdio_irqs;
 	struct task_struct	*sdio_irq_thread;
 	bool			sdio_irq_pending;
 	atomic_t		sdio_irq_thread_abort;
+	unsigned int            irq_wakeup;
+	unsigned int            break_suspend;
 
 	mmc_pm_flag_t		pm_flags;	/* requested pm features */
 
 	struct led_trigger	*led;		/* activity led */
 
 #ifdef CONFIG_REGULATOR
-	bool			regulator_enabled; /* regulator state */
+	bool			regulator_vmmc_enabled; /* regulator state */
+	bool			regulator_vqmmc_enabled; /* regulator state */
 #endif
 	struct mmc_supply	supply;
 
@@ -362,6 +402,24 @@ struct mmc_host {
 
 	unsigned int		slotno;	/* used for sdio acpi binding */
 
+#ifdef CONFIG_MMC_EMBEDDED_SDIO
+	struct {
+		struct sdio_cis			*cis;
+		struct sdio_cccr		*cccr;
+		struct sdio_embedded_func	*funcs;
+		int				num_funcs;
+	} embedded_sdio_data;
+#endif
+
+	/*
+	 * New feature: prevent suspend if bus is keepping busy
+	 * enabled by "FLAG_NO_SUSPEND_IF_BUSBUSY" in busbusy_flags
+	 */
+	unsigned int busbusy_flags;
+	struct wake_lock busbusy_wakelock;
+	unsigned int busbusy_wakelock_en;
+	int busbusy_timeout;
+
 	unsigned long		private[0] ____cacheline_aligned;
 };
 
@@ -370,6 +428,14 @@ int mmc_add_host(struct mmc_host *);
 void mmc_remove_host(struct mmc_host *);
 void mmc_free_host(struct mmc_host *);
 int mmc_of_parse(struct mmc_host *host);
+
+#ifdef CONFIG_MMC_EMBEDDED_SDIO
+extern void mmc_set_embedded_sdio_data(struct mmc_host *host,
+				       struct sdio_cis *cis,
+				       struct sdio_cccr *cccr,
+				       struct sdio_embedded_func *funcs,
+				       int num_funcs);
+#endif
 
 static inline void *mmc_priv(struct mmc_host *host)
 {
@@ -381,19 +447,37 @@ static inline void *mmc_priv(struct mmc_host *host)
 #define mmc_dev(x)	((x)->parent)
 #define mmc_classdev(x)	(&(x)->class_dev)
 #define mmc_hostname(x)	(dev_name(&(x)->class_dev))
+#define mmc_bus_needs_resume(host) ((host)->bus_resume_flags & MMC_BUSRESUME_NEEDS_RESUME)
+#define mmc_bus_manual_resume(host) ((host)->bus_resume_flags & MMC_BUSRESUME_MANUAL_RESUME)
+
+static inline void mmc_set_bus_resume_policy(struct mmc_host *host, int manual)
+{
+	if (manual)
+		host->bus_resume_flags |= MMC_BUSRESUME_MANUAL_RESUME;
+	else
+		host->bus_resume_flags &= ~MMC_BUSRESUME_MANUAL_RESUME;
+}
+
+extern int mmc_resume_bus(struct mmc_host *host);
 
 int mmc_power_save_host(struct mmc_host *host);
 int mmc_power_restore_host(struct mmc_host *host);
 
 void mmc_detect_change(struct mmc_host *, unsigned long delay);
+unsigned long mmc_detect_change_sync(struct mmc_host *host,
+			unsigned long delay, unsigned long timeout);
+void mmc_disable_sdio(struct mmc_host *host);
 void mmc_request_done(struct mmc_host *, struct mmc_request *);
 
 int mmc_cache_ctrl(struct mmc_host *, u8);
+extern void mmc_sdio_irq_wakeup(struct mmc_host *host);
 
 static inline void mmc_signal_sdio_irq(struct mmc_host *host)
 {
 	host->ops->enable_sdio_irq(host, 0);
 	host->sdio_irq_pending = true;
+	if (host->irq_wakeup)
+		mmc_sdio_irq_wakeup(host);
 	wake_up_process(host->sdio_irq_thread);
 }
 
@@ -403,6 +487,7 @@ int mmc_regulator_set_ocr(struct mmc_host *mmc,
 			struct regulator *supply,
 			unsigned short vdd_bit);
 int mmc_regulator_get_supply(struct mmc_host *mmc);
+#define MMC_UA_LOAD_REQUIREMENT		800000 /* mmc load requirement in uA */
 #else
 static inline int mmc_regulator_get_ocrmask(struct regulator *supply)
 {

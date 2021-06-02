@@ -24,6 +24,7 @@
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/pstore_ram.h>
+#include <linux/dma-mapping.h>
 #include <asm/page.h>
 
 struct persistent_ram_buffer {
@@ -392,7 +393,11 @@ static void *persistent_ram_vmap(phys_addr_t start, size_t size)
 	page_start = start - offset_in_page(start);
 	page_count = DIV_ROUND_UP(size + offset_in_page(start), PAGE_SIZE);
 
+#ifdef CONFIG_ARM64
+	prot = pgprot_writecombine(PAGE_KERNEL);
+#else
 	prot = pgprot_noncached(PAGE_KERNEL);
+#endif
 
 	pages = kmalloc(sizeof(struct page *) * page_count, GFP_KERNEL);
 	if (!pages) {
@@ -404,6 +409,8 @@ static void *persistent_ram_vmap(phys_addr_t start, size_t size)
 	for (i = 0; i < page_count; i++) {
 		phys_addr_t addr = page_start + i * PAGE_SIZE;
 		pages[i] = pfn_to_page(addr >> PAGE_SHIFT);
+		dma_sync_single_for_device(NULL, addr,
+				size, DMA_TO_DEVICE);
 	}
 	vaddr = vmap(pages, page_count, VM_MAP, prot);
 	kfree(pages);

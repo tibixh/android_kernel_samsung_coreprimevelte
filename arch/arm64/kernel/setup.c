@@ -42,6 +42,7 @@
 #include <linux/of_fdt.h>
 #include <linux/of_platform.h>
 
+#include <asm/cpu.h>
 #include <asm/cputype.h>
 #include <asm/elf.h>
 #include <asm/cputable.h>
@@ -54,6 +55,8 @@
 #include <asm/traps.h>
 #include <asm/memblock.h>
 #include <asm/psci.h>
+
+#include <asm/mach/arch.h>
 
 unsigned int processor_id;
 EXPORT_SYMBOL(processor_id);
@@ -71,8 +74,13 @@ EXPORT_SYMBOL_GPL(elf_hwcap);
 unsigned int compat_elf_hwcap __read_mostly = COMPAT_ELF_HWCAP_DEFAULT;
 #endif
 
+#ifdef CONFIG_MACH_PXA_SAMSUNG
+extern unsigned int system_rev;
+#endif
+
 static const char *cpu_name;
 static const char *machine_name;
+const struct machine_desc *machine_desc __initdata;
 phys_addr_t __fdt_pointer __initdata;
 
 /*
@@ -212,6 +220,8 @@ static void __init setup_processor(void)
 	sprintf(init_utsname()->machine, ELF_PLATFORM);
 	elf_hwcap = 0;
 
+	cpuinfo_store_boot_cpu();
+
 	/*
 	 * ID_AA64ISAR0_EL1 contains 4-bit wide signed feature blocks.
 	 * The blocks we test below represent incremental functionality
@@ -244,8 +254,23 @@ static void __init setup_processor(void)
 		elf_hwcap |= HWCAP_CRC32;
 }
 
+static const void * __init arch_get_next_mach(const char *const **match)
+{
+	static const struct machine_desc *mdesc = __arch_info_begin;
+	const struct machine_desc *m = mdesc;
+
+	if (m >= __arch_info_end)
+		return NULL;
+
+	mdesc++;
+	*match = m->dt_compat;
+	return m;
+}
+
 static void __init setup_machine_fdt(phys_addr_t dt_phys)
 {
+	const struct machine_desc *mdesc;
+
 	if (!dt_phys || !early_init_dt_scan(phys_to_virt(dt_phys))) {
 		early_print("\n"
 			"Error: invalid device tree blob at physical address 0x%p (virtual address 0x%p)\n"
@@ -257,7 +282,29 @@ static void __init setup_machine_fdt(phys_addr_t dt_phys)
 			cpu_relax();
 	}
 
-	machine_name = of_flat_dt_get_machine_name();
+	mdesc = of_flat_dt_match_machine(NULL, arch_get_next_mach);
+	if (!mdesc) {
+		const char *prop;
+		long size;
+		unsigned long dt_root;
+
+		early_print("\nError: unrecognized/unsupported "
+			    "device tree compatible list:\n[ ");
+
+		dt_root = of_get_flat_dt_root();
+		prop = of_get_flat_dt_prop(dt_root, "compatible", &size);
+		while (size > 0) {
+			early_print("'%s' ", prop);
+			size -= strlen(prop) + 1;
+			prop += strlen(prop) + 1;
+		}
+		early_print("]\n\n");
+
+		machine_halt();
+	}
+
+	machine_desc = mdesc;
+	machine_name = mdesc->name;
 }
 
 /*
@@ -307,6 +354,53 @@ static void __init request_standard_resources(void)
 	}
 }
 
+#ifdef CONFIG_KEXEC
+static inline unsigned long long get_total_mem(void)
+{
+	unsigned long total;
+
+	total = max_low_pfn - min_low_pfn;
+	return total << PAGE_SHIFT;
+}
+
+/**
+ * reserve_crashkernel() - reserves memory are for crash kernel
+ *
+ * This function reserves memory area given in "crashkernel=" kernel command
+ * line parameter. The memory reserved is used by a dump capture kernel when
+ * primary kernel is crashing.
+ */
+static void __init reserve_crashkernel(void)
+{
+	unsigned long long crash_size, crash_base;
+	unsigned long long total_mem;
+	int ret;
+
+	total_mem = get_total_mem();
+	ret = parse_crashkernel(boot_command_line, total_mem,
+				&crash_size, &crash_base);
+	if (ret)
+		return;
+
+	ret = memblock_reserve(crash_base, crash_size);
+	if (ret < 0) {
+		pr_warn("crashkernel reservation failed - memory is in use (0x%lx)\n",
+			(unsigned long)crash_base);
+		return;
+	}
+
+	pr_info("Reserving %ldKB of memory at 0x%lx for crashkernel\n",
+	       (unsigned long)(crash_size >> 10),
+	       (unsigned long)(crash_base));
+
+	crashk_res.start = crash_base;
+	crashk_res.end = crash_base + crash_size - 1;
+	insert_resource(&iomem_resource, &crashk_res);
+}
+#else
+static inline void reserve_crashkernel(void) {}
+#endif /* CONFIG_KEXEC */
+
 u64 __cpu_logical_map[NR_CPUS] = { [0 ... NR_CPUS-1] = INVALID_HWID };
 
 void __init setup_arch(char **cmdline_p)
@@ -345,6 +439,7 @@ void __init setup_arch(char **cmdline_p)
 	smp_build_mpidr_hash();
 #endif
 
+	reserve_crashkernel();
 #ifdef CONFIG_VT
 #if defined(CONFIG_VGA_CONSOLE)
 	conswitchp = &vga_con;
@@ -356,20 +451,27 @@ void __init setup_arch(char **cmdline_p)
 
 static int __init arm64_device_init(void)
 {
-	of_clk_init(NULL);
-	of_platform_populate(NULL, of_default_bus_match_table, NULL, NULL);
+	if (machine_desc && machine_desc->init_clk)
+		machine_desc->init_clk();
+	else
+		of_clk_init(NULL);
+
+	if (machine_desc && machine_desc->init_machine)
+		machine_desc->init_machine();
+	else
+		of_platform_populate(NULL, of_default_bus_match_table,
+					NULL, NULL);
+
 	return 0;
 }
 arch_initcall(arm64_device_init);
-
-static DEFINE_PER_CPU(struct cpu, cpu_data);
 
 static int __init topology_init(void)
 {
 	int i;
 
 	for_each_possible_cpu(i) {
-		struct cpu *cpu = &per_cpu(cpu_data, i);
+		struct cpu *cpu = &per_cpu(cpu_data.cpu, i);
 		cpu->hotpluggable = 1;
 		register_cpu(cpu, i);
 	}
@@ -394,8 +496,13 @@ static int c_show(struct seq_file *m, void *v)
 {
 	int i;
 
-	seq_printf(m, "Processor\t: %s rev %d (%s)\n",
-		   cpu_name, read_cpuid_id() & 15, ELF_PLATFORM);
+	if (is_compat_task())
+		seq_printf(m, "Processor\t: %s rev %d (%s)\n",
+			"ARMv8 Processor", read_cpuid_id() & 15,
+			COMPAT_ELF_PLATFORM);
+	else
+		seq_printf(m, "Processor\t: %s rev %d (%s)\n",
+			cpu_name, read_cpuid_id() & 15, ELF_PLATFORM);
 
 	for_each_online_cpu(i) {
 		/*
@@ -414,9 +521,14 @@ static int c_show(struct seq_file *m, void *v)
 	for (i = 0; hwcap_str[i]; i++)
 		if (elf_hwcap & (1 << i))
 			seq_printf(m, "%s ", hwcap_str[i]);
+	seq_puts(m, " half thumb fastmult edsp tls vfp vfpv3 vfpv4 neon idiva idivt ");
 
 	seq_printf(m, "\nCPU implementer\t: 0x%02x\n", read_cpuid_id() >> 24);
-	seq_printf(m, "CPU architecture: AArch64\n");
+
+	if (is_compat_task())
+		seq_puts(m, "CPU architecture: 7\n");
+	else
+		seq_puts(m, "CPU architecture: 8\n");
 	seq_printf(m, "CPU variant\t: 0x%x\n", (read_cpuid_id() >> 20) & 15);
 	seq_printf(m, "CPU part\t: 0x%03x\n", (read_cpuid_id() >> 4) & 0xfff);
 	seq_printf(m, "CPU revision\t: %d\n", read_cpuid_id() & 15);
@@ -424,7 +536,9 @@ static int c_show(struct seq_file *m, void *v)
 	seq_puts(m, "\n");
 
 	seq_printf(m, "Hardware\t: %s\n", machine_name);
-
+#ifdef CONFIG_MACH_PXA_SAMSUNG
+	seq_printf(m, "Revision\t: %04x\n", system_rev);
+#endif
 	return 0;
 }
 

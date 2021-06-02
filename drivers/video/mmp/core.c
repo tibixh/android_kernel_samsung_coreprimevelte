@@ -28,8 +28,12 @@
 static struct mmp_overlay *path_get_overlay(struct mmp_path *path,
 		int overlay_id)
 {
-	if (path && overlay_id < path->overlay_num)
-		return &path->overlays[overlay_id];
+	int i;
+
+	for (i = 0; i < path->overlay_num; i++)
+		if (path->overlays[i].id == overlay_id)
+			return &path->overlays[i];
+
 	return NULL;
 }
 
@@ -66,6 +70,7 @@ static int path_get_modelist(struct mmp_path *path,
  * path list is used for both buffer driver and platdriver
  * plat driver do path register/unregister
  * panel driver do panel register/unregister
+ * port driver do port register/unregister
  * buffer driver get registered path
  */
 static LIST_HEAD(panel_list);
@@ -177,13 +182,15 @@ struct mmp_path *mmp_register_path(struct mmp_path_info *info)
 
 	/* path set */
 	mutex_init(&path->access_ok);
+	spin_lock_init(&path->commit_lock);
+	spin_lock_init(&path->irq_lock);
+	spin_lock_init(&path->vcnt_lock);
 	path->dev = info->dev;
 	path->id = info->id;
 	path->name = info->name;
 	path->output_type = info->output_type;
 	path->overlay_num = info->overlay_num;
 	path->plat_data = info->plat_data;
-	path->ops.set_mode = info->set_mode;
 
 	mutex_lock(&disp_lock);
 	/* get panel */
@@ -198,18 +205,15 @@ struct mmp_path *mmp_register_path(struct mmp_path_info *info)
 	dev_info(path->dev, "register %s, overlay_num %d\n",
 			path->name, path->overlay_num);
 
-	/* default op set: if already set by driver, never cover it */
-	if (!path->ops.check_status)
-		path->ops.check_status = path_check_status;
-	if (!path->ops.get_overlay)
-		path->ops.get_overlay = path_get_overlay;
-	if (!path->ops.get_modelist)
-		path->ops.get_modelist = path_get_modelist;
+	/* default op set */
+	path->ops.check_status = path_check_status;
+	path->ops.get_overlay = path_get_overlay;
+	path->ops.get_modelist = path_get_modelist;
 
 	/* step3: init overlays */
 	for (i = 0; i < path->overlay_num; i++) {
 		path->overlays[i].path = path;
-		path->overlays[i].id = i;
+		path->overlays[i].id = info->overlay_table[i];
 		mutex_init(&path->overlays[i].access_ok);
 		path->overlays[i].ops = info->overlay_ops;
 	}

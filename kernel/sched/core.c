@@ -1108,7 +1108,6 @@ int migrate_swap(struct task_struct *cur, struct task_struct *p)
 	if (!cpumask_test_cpu(arg.src_cpu, tsk_cpus_allowed(arg.dst_task)))
 		goto out;
 
-	trace_sched_swap_numa(cur, arg.src_cpu, p, arg.dst_cpu);
 	ret = stop_two_cpus(arg.dst_cpu, arg.src_cpu, migrate_swap_stop, &arg);
 
 out:
@@ -1504,7 +1503,11 @@ void scheduler_ipi(void)
 
 	if (llist_empty(&this_rq()->wake_list)
 			&& !tick_nohz_full_cpu(smp_processor_id())
-			&& !got_nohz_idle_kick())
+			&& !got_nohz_idle_kick()
+#ifdef CONFIG_SCHED_HMP
+			&& (hmp_enabled ? (!this_rq()->wake_for_idle_pull) : 1)
+#endif
+			)
 		return;
 
 	/*
@@ -1531,6 +1534,11 @@ void scheduler_ipi(void)
 		this_rq()->idle_balance = 1;
 		raise_softirq_irqoff(SCHED_SOFTIRQ);
 	}
+#ifdef CONFIG_SCHED_HMP
+	else if (hmp_enabled && unlikely(this_rq()->wake_for_idle_pull))
+		raise_softirq_irqoff(SCHED_SOFTIRQ);
+#endif
+
 	irq_exit();
 }
 
@@ -1712,6 +1720,41 @@ static void __sched_fork(unsigned long clone_flags, struct task_struct *p)
 	p->se.nr_migrations		= 0;
 	p->se.vruntime			= 0;
 	INIT_LIST_HEAD(&p->se.group_node);
+
+
+#ifdef CONFIG_HMP_BOOST
+/*
+ * Load-tracking only depends on SMP, FAIR_GROUP_SCHED dependency below may be
+ * removed when useful for applications beyond shares distribution (e.g.
+ * load-balance).
+ */
+#if defined(CONFIG_SMP) && defined(CONFIG_FAIR_GROUP_SCHED)
+	p->se.avg.runnable_avg_period = 0;
+	p->se.avg.runnable_avg_sum = 0;
+#ifdef CONFIG_SCHED_HMP
+	p->se.avg.hmp_last_up_migration = 0;
+	p->se.avg.hmp_last_down_migration = 0;
+#endif
+#endif
+
+#else
+#ifdef CONFIG_SCHED_HMP
+	/* keep LOAD_AVG_MAX in sync with fair.c if load avg series is changed */
+#define LOAD_AVG_MAX 47742
+	if (hmp_enabled) {
+		p->se.avg.hmp_last_up_migration = 0;
+		p->se.avg.hmp_last_down_migration = 0;
+		if (hmp_task_should_forkboost(p)) {
+			p->se.avg.load_avg_ratio = 1023;
+			p->se.avg.load_avg_contrib =
+				(1023 * scale_load_down(p->se.load.weight));
+			p->se.avg.runnable_avg_period = LOAD_AVG_MAX;
+			p->se.avg.runnable_avg_sum = LOAD_AVG_MAX;
+			p->se.avg.usage_avg_sum = LOAD_AVG_MAX;
+		}
+	} /* hmp_enabled */
+#endif
+#endif
 
 #ifdef CONFIG_SCHEDSTATS
 	memset(&p->se.statistics, 0, sizeof(p->se.statistics));
@@ -2100,7 +2143,7 @@ static inline void
 prepare_task_switch(struct rq *rq, struct task_struct *prev,
 		    struct task_struct *next)
 {
-	trace_sched_switch(prev, next);
+	trace_sched_switch(prev, next, CALLER_ADDR0);
 	sched_info_switch(rq, prev, next);
 	perf_event_task_sched_out(prev, next);
 	fire_sched_out_preempt_notifiers(prev, next);
@@ -2301,6 +2344,24 @@ unsigned long nr_running(void)
 	return sum;
 }
 
+#ifdef CONFIG_HMP_BOOST
+unsigned long nr_running_cpu(unsigned int cpu)
+{
+	return cpu_rq(cpu)->nr_running;
+}
+#endif
+
+/*
+ * get task number of cpu
+ */
+unsigned long get_cpu_nr_running(unsigned int cpu)
+{
+	if (cpu < num_possible_cpus())
+		return cpu_rq(cpu)->nr_running;
+	else
+		return 0;
+}
+
 unsigned long long nr_context_switches(void)
 {
 	int i;
@@ -2327,6 +2388,14 @@ unsigned long nr_iowait_cpu(int cpu)
 	struct rq *this = cpu_rq(cpu);
 	return atomic_read(&this->nr_iowait);
 }
+
+#ifdef CONFIG_RUNTIME_COMPCACHE
+unsigned long this_cpu_loadx(int i)
+{
+	struct rq *this = this_rq();
+	return this->cpu_load[i];
+}
+#endif /* CONFIG_RUNTIME_COMPCACHE */
 
 #ifdef CONFIG_SMP
 
@@ -2614,6 +2683,7 @@ pick_next_task(struct rq *rq)
 	}
 
 	BUG(); /* the idle class will always have a runnable task */
+	return NULL;
 }
 
 /*
@@ -3178,6 +3248,8 @@ static struct task_struct *find_process_by_pid(pid_t pid)
  * absolute deadline will be properly calculated when the task is enqueued
  * for the first time with its new policy.
  */
+extern struct cpumask hmp_slow_cpu_mask;
+
 static void
 __setparam_dl(struct task_struct *p, const struct sched_attr *attr)
 {
@@ -3221,8 +3293,17 @@ static void __setscheduler(struct rq *rq, struct task_struct *p,
 
 	if (dl_prio(p->prio))
 		p->sched_class = &dl_sched_class;
-	else if (rt_prio(p->prio))
+	else if (rt_prio(p->prio)) {
 		p->sched_class = &rt_sched_class;
+#ifdef CONFIG_SCHED_HMP
+		if (hmp_enabled && !cpumask_empty(&hmp_slow_cpu_mask))
+			if (cpumask_equal(&p->cpus_allowed, cpu_all_mask)) {
+				p->nr_cpus_allowed =
+					cpumask_weight(&hmp_slow_cpu_mask);
+				do_set_cpus_allowed(p, &hmp_slow_cpu_mask);
+			}
+#endif
+	}
 	else
 		p->sched_class = &fair_sched_class;
 
@@ -4668,7 +4749,6 @@ int migrate_task_to(struct task_struct *p, int target_cpu)
 
 	/* TODO: This is not properly updating schedstats */
 
-	trace_sched_move_numa(p, curr_cpu, target_cpu);
 	return stop_one_cpu(curr_cpu, migration_cpu_stop, &arg);
 }
 
@@ -5878,6 +5958,9 @@ sd_init_##type(struct sched_domain_topology_level *tl, int cpu) 	\
 }
 
 SD_INIT_FUNC(CPU)
+#ifdef CONFIG_SCHED_HMP
+SD_INIT_FUNC(HMP_CPU)
+#endif
 #ifdef CONFIG_SCHED_SMT
  SD_INIT_FUNC(SIBLING)
 #endif
@@ -5887,6 +5970,17 @@ SD_INIT_FUNC(CPU)
 #ifdef CONFIG_SCHED_BOOK
  SD_INIT_FUNC(BOOK)
 #endif
+
+static noinline struct sched_domain *
+sd_init_both_CPU(struct sched_domain_topology_level *tl, int cpu)
+{
+#ifdef CONFIG_SCHED_HMP
+	if (hmp_enabled)
+		return sd_init_HMP_CPU(tl, cpu);
+	else
+#endif
+		return sd_init_CPU(tl, cpu);
+}
 
 static int default_relax_domain_level = -1;
 int sched_domain_level_max;
@@ -5995,7 +6089,7 @@ static struct sched_domain_topology_level default_topology[] = {
 #ifdef CONFIG_SCHED_BOOK
 	{ sd_init_BOOK, cpu_book_mask, },
 #endif
-	{ sd_init_CPU, cpu_cpu_mask, },
+	{ sd_init_both_CPU, cpu_cpu_mask, },
 	{ NULL, },
 };
 
@@ -6910,6 +7004,11 @@ void __init sched_init(void)
 		rq->avg_idle = 2*sysctl_sched_migration_cost;
 		rq->max_idle_balance_cost = sysctl_sched_migration_cost;
 
+#ifdef CONFIG_SCHED_HMP
+		rq->capacity = 1024;
+		rq->hmp_flags = 0;
+#endif
+
 		INIT_LIST_HEAD(&rq->cfs_tasks);
 
 		rq_attach_root(rq, &def_root_domain);
@@ -6971,13 +7070,24 @@ static inline int preempt_count_equals(int preempt_offset)
 	return (nested == preempt_offset);
 }
 
+static int __might_sleep_init_called;
+int __init __might_sleep_init(void)
+{
+	__might_sleep_init_called = 1;
+	return 0;
+}
+early_initcall(__might_sleep_init);
+
 void __might_sleep(const char *file, int line, int preempt_offset)
 {
 	static unsigned long prev_jiffy;	/* ratelimiting */
 
 	rcu_sleep_check(); /* WARN_ON_ONCE() by default, no rate limit reqd. */
 	if ((preempt_count_equals(preempt_offset) && !irqs_disabled()) ||
-	    system_state != SYSTEM_RUNNING || oops_in_progress)
+	    oops_in_progress)
+		return;
+	if (system_state != SYSTEM_RUNNING &&
+	    (!__might_sleep_init_called || system_state != SYSTEM_BOOTING))
 		return;
 	if (time_before(jiffies, prev_jiffy + HZ) && prev_jiffy)
 		return;
@@ -7643,6 +7753,24 @@ static void cpu_cgroup_css_offline(struct cgroup_subsys_state *css)
 	sched_offline_group(tg);
 }
 
+static int cpu_cgroup_allow_attach(struct cgroup_subsys_state *css,
+				   struct cgroup_taskset *tset)
+{
+	const struct cred *cred = current_cred(), *tcred;
+	struct task_struct *task;
+
+	cgroup_taskset_for_each(task, css, tset) {
+		tcred = __task_cred(task);
+
+		if ((current != task) && !capable(CAP_SYS_NICE) &&
+		    !uid_eq(cred->euid, tcred->uid) &&
+		    !uid_eq(cred->euid, tcred->suid))
+			return -EACCES;
+	}
+
+	return 0;
+}
+
 static int cpu_cgroup_can_attach(struct cgroup_subsys_state *css,
 				 struct cgroup_taskset *tset)
 {
@@ -8013,6 +8141,7 @@ struct cgroup_subsys cpu_cgroup_subsys = {
 	.css_offline	= cpu_cgroup_css_offline,
 	.can_attach	= cpu_cgroup_can_attach,
 	.attach		= cpu_cgroup_attach,
+	.allow_attach	= cpu_cgroup_allow_attach,
 	.exit		= cpu_cgroup_exit,
 	.subsys_id	= cpu_cgroup_subsys_id,
 	.base_cftypes	= cpu_files,

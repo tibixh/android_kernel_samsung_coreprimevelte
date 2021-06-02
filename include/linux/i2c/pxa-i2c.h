@@ -68,8 +68,15 @@ struct i2c_pxa_platform_data {
 	unsigned int		use_pio :1;
 	unsigned int		fast_mode :1;
 	unsigned int		high_mode:1;
+	unsigned int		always_on:1;
+	unsigned int		apdcp:1;
 	unsigned char		master_code;
 	unsigned long		rate;
+	unsigned int		ilcr;
+	unsigned int		iwcr;
+	void			(*hardware_lock)(struct i2c_adapter *);
+	void			(*hardware_unlock)(struct i2c_adapter *);
+	int			(*hardware_trylock)(struct i2c_adapter *);
 };
 
 extern void pxa_set_i2c_info(struct i2c_pxa_platform_data *info);

@@ -32,6 +32,10 @@
 #include <linux/swap.h>
 #include <linux/mm_types.h>
 #include <linux/dma-contiguous.h>
+#ifdef CONFIG_OF
+#include <linux/of_fdt.h>
+#include <linux/of.h>
+#endif
 
 struct cma {
 	unsigned long	base_pfn;
@@ -40,6 +44,8 @@ struct cma {
 };
 
 struct cma *dma_contiguous_default_area;
+
+int cma_available;
 
 #ifdef CONFIG_CMA_SIZE_MBYTES
 #define CMA_SIZE_MBYTES CONFIG_CMA_SIZE_MBYTES
@@ -58,6 +64,9 @@ struct cma *dma_contiguous_default_area;
  * should use cma= kernel parameter.
  */
 static const phys_addr_t size_bytes = CMA_SIZE_MBYTES * SZ_1M;
+#ifdef CONFIG_OF
+static phys_addr_t __initdata cma_size_bytes;
+#endif
 static phys_addr_t size_cmdline = -1;
 
 static int __init early_cma(char *p)
@@ -67,6 +76,28 @@ static int __init early_cma(char *p)
 	return 0;
 }
 early_param("cma", early_cma);
+
+#ifdef CONFIG_OF
+static int __init cma_fdt_find_info(unsigned long node, const char *uname,
+						int depth, void *data)
+{
+	__be32 *prop;
+	unsigned long len;
+
+	if (!of_flat_dt_is_compatible(node, "linux,cma-heap"))
+		return 0;
+
+	prop = of_get_flat_dt_prop(node, "cma-size", &len);
+	if (!prop || (len != sizeof(unsigned int))) {
+		pr_err("%s: Can't find cma size property\n", __func__);
+		return 0;
+	}
+
+	cma_size_bytes = be32_to_cpu(prop[0]);
+
+	return 1;
+}
+#endif
 
 #ifdef CONFIG_CMA_SIZE_PERCENTAGE
 
@@ -109,7 +140,10 @@ void __init dma_contiguous_reserve(phys_addr_t limit)
 	phys_addr_t selected_size = 0;
 
 	pr_debug("%s(limit %08lx)\n", __func__, (unsigned long)limit);
-
+#ifdef CONFIG_OF
+	if (of_scan_flat_dt(cma_fdt_find_info, NULL))
+		selected_size = cma_size_bytes;
+#else
 	if (size_cmdline != -1) {
 		selected_size = size_cmdline;
 	} else {
@@ -123,7 +157,7 @@ void __init dma_contiguous_reserve(phys_addr_t limit)
 		selected_size = max(size_bytes, cma_early_percent_memory());
 #endif
 	}
-
+#endif	// CONFIG_OF
 	if (selected_size && !dma_contiguous_default_area) {
 		pr_debug("%s: reserving %ld MiB for global area\n", __func__,
 			 (unsigned long)selected_size / SZ_1M);
@@ -155,12 +189,6 @@ static int __init cma_activate_area(struct cma *cma)
 		base_pfn = pfn;
 		for (j = pageblock_nr_pages; j; --j, pfn++) {
 			WARN_ON_ONCE(!pfn_valid(pfn));
-			/*
-			 * alloc_contig_range requires the pfn range
-			 * specified to be in the same zone. Make this
-			 * simple by forcing the entire CMA resv range
-			 * to be in the same zone.
-			 */
 			if (page_zone(pfn_to_page(pfn)) != zone)
 				goto err;
 		}
@@ -168,7 +196,6 @@ static int __init cma_activate_area(struct cma *cma)
 	} while (--i);
 
 	return 0;
-
 err:
 	kfree(cma->bitmap);
 	return -EINVAL;
@@ -177,9 +204,106 @@ err:
 static struct cma cma_areas[MAX_CMA_AREAS];
 static unsigned cma_area_count;
 
+#include <linux/seq_file.h>
+#include <linux/proc_fs.h>
+extern unsigned long migrate_page_copy_count;
+static int cma_info_show(struct seq_file *s, void *unused)
+{
+	struct cma *cma = dev_get_cma_area(NULL);
+	unsigned long start = 0, set = 0, end = 0, sum = 0;
+	int nr_per_order[32];
+	int i, total = 0, order, order_max = 0;
+	struct page *pg;
+	phys_addr_t fm = __pfn_to_phys(cma->base_pfn);
+	phys_addr_t to = __pfn_to_phys(cma->base_pfn + cma->count - 1);
+
+	seq_printf(s, "CMA Region: pfn(0x%lx:0x%lx) phy(%pa:%pa)\n",
+		cma->base_pfn, cma->base_pfn + cma->count - 1, &fm, &to);
+
+	seq_printf(s, "\n( Un-Set    )           [ Set       ]\n");
+	while (1) {
+		set = find_next_bit(cma->bitmap, cma->count, start);
+		if (set >= cma->count)
+			break;
+		end = find_next_zero_bit(cma->bitmap, cma->count, set);
+
+		if (set > 0)
+			seq_printf(s, "(0x%5lx:0x%5lx) %5ld ",
+				cma->base_pfn + start, cma->base_pfn + set - 1,
+				set - start);
+		else
+			seq_printf(s, "%16.s", "");
+
+		seq_printf(s, "\t[0x%5lx:0x%5lx] %5ld\n", cma->base_pfn + set,
+			cma->base_pfn + end - 1, end - set);
+
+		start = end;
+		sum += (end - set);
+	}
+
+	if (start < cma->count)
+		seq_printf(s, "(0x%5lx:0x%5lx) %5ld\n",
+			cma->base_pfn + start, cma->base_pfn + cma->count - 1,
+			cma->count - start);
+
+	seq_printf(s, "Total: %16ld%24ld%12ld(pages)\n",
+		cma->count - sum, sum, cma->count);
+
+	for (i = 0; i < 32; i++)
+		nr_per_order[i] = 0;
+	pg = pfn_to_page(cma->base_pfn);
+	start = -1;
+	for (i = 0; i < cma->count; i++, pg++) {
+		if (!test_bit(i, cma->bitmap) && !page_count(pg)) {
+			if (start == -1)
+				start = i;
+			end = i;
+
+			if (i < (cma->count - 1))
+				continue;
+		}
+		if (start != -1) {
+			total += (end - start + 1);
+			order = fls(end - start + 1) - 1;
+
+			nr_per_order[order]++;
+			start = -1;
+			if (order_max < order)
+				order_max = order;
+		}
+	}
+
+	seq_printf(s, "\nIdle pages per order, total: %d\nOrder:", total);
+	for (i = 0; i <= order_max; i++)
+		seq_printf(s, "%6d ", i);
+
+	seq_printf(s, "\nCount:");
+	for (i = 0; i <= order_max; i++)
+		seq_printf(s, "%6d ", nr_per_order[i]);
+	seq_printf(s, "\n");
+
+	return 0;
+}
+
+static int cma_info_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, cma_info_show, inode->i_private);
+}
+
+static const struct file_operations cma_info_fops = {
+	.open = cma_info_open,
+	.read = seq_read,
+	.llseek = seq_lseek,
+	.release = single_release,
+};
+
+
 static int __init cma_init_reserved_areas(void)
 {
 	int i;
+
+	if (!cma_available)
+		return 0;
 
 	for (i = 0; i < cma_area_count; i++) {
 		int ret = cma_activate_area(&cma_areas[i]);
@@ -187,6 +311,7 @@ static int __init cma_init_reserved_areas(void)
 			return ret;
 	}
 
+	proc_create("cmainfo", S_IRUGO, NULL, &cma_info_fops);
 	return 0;
 }
 core_initcall(cma_init_reserved_areas);
@@ -265,10 +390,44 @@ int __init dma_contiguous_reserve_area(phys_addr_t size, phys_addr_t base,
 
 	/* Architecture specific contiguous memory fixup. */
 	dma_contiguous_early_fixup(base, size);
+
+	cma_available = 1;
 	return 0;
 err:
 	pr_err("CMA: failed to reserve %ld MiB\n", (unsigned long)size / SZ_1M);
 	return ret;
+}
+
+static int cma_bitmap_show(struct device *dev)
+{
+	struct cma *cma = dev_get_cma_area(dev);
+	unsigned long start = 0, set = 0, end = 0, sum = 0;
+
+	pr_debug("cma free list pfn[%lx %lx]: dev(%s)\n", cma->base_pfn,
+		cma->base_pfn + cma->count - 1, dev ? dev_name(dev) : "");
+
+	while (1) {
+		set = find_next_bit(cma->bitmap, cma->count, start);
+		if (set >= cma->count)
+			break;
+		end = find_next_zero_bit(cma->bitmap, cma->count, set);
+
+		if (set > 0)
+			pr_debug("[%6lx:%6lx] %6lx %6lx",
+				cma->base_pfn + start, cma->base_pfn + set - 1,
+				set - start, end - set);
+		start = end;
+		sum += (end - set);
+	}
+
+	if (start < cma->count)
+		pr_debug("[%6lx:%6lx] %6lx ",
+			cma->base_pfn + start, cma->base_pfn + cma->count - 1,
+			cma->count - start);
+
+	pr_info("Total: free(%lx) set(%lx) all(%lx)\n",
+		cma->count - sum, sum, cma->count);
+	return 0;
 }
 
 /**
@@ -285,7 +444,7 @@ err:
 struct page *dma_alloc_from_contiguous(struct device *dev, int count,
 				       unsigned int align)
 {
-	unsigned long mask, pfn, pageno, start = 0;
+	unsigned long mask, pfn = 0, pageno, start = 0;
 	struct cma *cma = dev_get_cma_area(dev);
 	struct page *page = NULL;
 	int ret;
@@ -321,14 +480,18 @@ struct page *dma_alloc_from_contiguous(struct device *dev, int count,
 		} else if (ret != -EBUSY) {
 			break;
 		}
-		pr_debug("%s(): memory range at %p is busy, retrying\n",
-			 __func__, pfn_to_page(pfn));
+		pr_debug("%s(): memory range at %p (%lx, %lx) is busy,"\
+			" retrying\n", __func__, pfn_to_page(pfn),
+			pfn, pfn + count);
 		/* try again with a bit different memory target */
 		start = pageno + mask + 1;
 	}
 
+	if (!page)
+		cma_bitmap_show(dev);
+
 	mutex_unlock(&cma_mutex);
-	pr_debug("%s(): returned %p\n", __func__, page);
+	pr_debug("%s(): returned %p pfn(%lx)\n", __func__, page, pfn);
 	return page;
 }
 

@@ -58,6 +58,10 @@ static bool has_full_constraints;
 
 static struct dentry *debugfs_root;
 
+#if defined(CONFIG_MACH_J7MLTE)
+extern unsigned int lpcharge;
+#endif
+
 /*
  * struct regulator_map
  *
@@ -300,6 +304,25 @@ static int regulator_check_drms(struct regulator_dev *rdev)
 	return 0;
 }
 
+static ssize_t regulator_uV_store(struct device *dev,
+				  struct device_attribute *attr,
+				  const char *buf, size_t count)
+{
+	struct regulator_dev *rdev = dev_get_drvdata(dev);
+	ssize_t err;
+	int target_uV;
+
+	sscanf(buf, "%d", &target_uV);
+
+	mutex_lock(&rdev->mutex);
+	err = _regulator_do_set_voltage(rdev, target_uV, target_uV);
+	if (err < 0)
+		dev_err(dev, "set voltage %duV fails: %zd\n", target_uV, err);
+	mutex_unlock(&rdev->mutex);
+
+	return count;
+}
+
 static ssize_t regulator_uV_show(struct device *dev,
 				struct device_attribute *attr, char *buf)
 {
@@ -312,7 +335,7 @@ static ssize_t regulator_uV_show(struct device *dev,
 
 	return ret;
 }
-static DEVICE_ATTR(microvolts, 0444, regulator_uV_show, NULL);
+static DEVICE_ATTR(microvolts, 0644, regulator_uV_show, regulator_uV_store);
 
 static ssize_t regulator_uA_show(struct device *dev,
 				struct device_attribute *attr, char *buf)
@@ -378,7 +401,32 @@ static ssize_t regulator_state_show(struct device *dev,
 
 	return ret;
 }
-static DEVICE_ATTR(state, 0444, regulator_state_show, NULL);
+
+static int _regulator_do_enable(struct regulator_dev *rdev);
+static int _regulator_do_disable(struct regulator_dev *rdev);
+
+static ssize_t regulator_state_store(struct device *dev,
+				  struct device_attribute *attr,
+				  const char *buf, size_t count)
+{
+	struct regulator_dev *rdev = dev_get_drvdata(dev);
+	ssize_t err;
+	int enable;
+
+	sscanf(buf, "%d", &enable);
+
+	mutex_lock(&rdev->mutex);
+	if (enable)
+		err = _regulator_do_enable(rdev);
+	else
+		err = _regulator_do_disable(rdev);
+	if (err < 0 && err != -EINVAL)
+		rdev_err(rdev, "failed to enable\n");
+	mutex_unlock(&rdev->mutex);
+
+	return count;
+}
+static DEVICE_ATTR(state, 0644, regulator_state_show, regulator_state_store);
 
 static ssize_t regulator_status_show(struct device *dev,
 				   struct device_attribute *attr, char *buf)
@@ -953,8 +1001,6 @@ static int machine_constraints_current(struct regulator_dev *rdev,
 	return 0;
 }
 
-static int _regulator_do_enable(struct regulator_dev *rdev);
-
 /**
  * set_machine_constraints - sets regulator constraints
  * @rdev: regulator source
@@ -1022,6 +1068,16 @@ static int set_machine_constraints(struct regulator_dev *rdev,
 			goto out;
 		}
 	}
+
+#if defined(CONFIG_MACH_J7MLTE)
+	if ((strcmp(rdev_get_name(rdev), "LDO3") == 0) && (lpcharge == 0)) {
+		ret = _regulator_do_enable(rdev);
+                if (ret < 0 && ret != -EINVAL) {
+                        rdev_err(rdev, "failed to enable\n");
+                        goto out;
+                }
+	}
+#endif
 
 	if ((rdev->constraints->ramp_delay || rdev->constraints->ramp_disable)
 		&& ops->set_ramp_delay) {
@@ -2577,6 +2633,48 @@ out:
 	return ret;
 }
 EXPORT_SYMBOL_GPL(regulator_sync_voltage);
+
+int regulator_set_suspend_voltage(struct regulator *regulator, int uV)
+{
+	struct regulator_dev *rdev = regulator->rdev;
+	int ret = 0;
+
+	mutex_lock(&rdev->mutex);
+
+	/* sanity check */
+	if (!rdev->desc->ops->set_suspend_voltage) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	ret = rdev->desc->ops->set_suspend_voltage(rdev, uV);
+
+out:
+	mutex_unlock(&rdev->mutex);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(regulator_set_suspend_voltage);
+
+int regulator_set_suspend_mode(struct regulator *regulator, unsigned int mode)
+{
+	struct regulator_dev *rdev = regulator->rdev;
+	int ret = 0;
+
+	mutex_lock(&rdev->mutex);
+
+	/* sanity check */
+	if (!rdev->desc->ops->set_suspend_mode) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	ret = rdev->desc->ops->set_suspend_mode(rdev, mode);
+
+out:
+	mutex_unlock(&rdev->mutex);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(regulator_set_suspend_mode);
 
 static int _regulator_get_voltage(struct regulator_dev *rdev)
 {

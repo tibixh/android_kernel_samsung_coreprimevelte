@@ -2603,6 +2603,14 @@ int usb_add_hcd(struct usb_hcd *hcd,
 				usb_put_phy(phy);
 				return retval;
 			}
+#ifdef CONFIG_USB_PHY_TUNE
+			retval = usb_phy_tune(phy, 0);
+			if (retval) {
+				dev_err(hcd->self.controller,
+					"tune phy error %d\n", retval);
+				return retval;
+			}
+#endif
 			hcd->phy = phy;
 			hcd->remove_phy = 1;
 		}

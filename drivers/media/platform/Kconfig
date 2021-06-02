@@ -115,6 +115,117 @@ config VIDEO_S3C_CAMIF
 	  To compile this driver as a module, choose M here: the module
 	  will be called s3c-camif.
 
+config VIDEO_MMPISP
+	bool "Marvell MMP ISP framework support"
+	select VIDEOBUF2_DMA_CONTIG
+	depends on VIDEO_V4L2 && VIDEO_V4L2_SUBDEV_API && ARCH_MMP
+	select DMA_SHARED_BUFFER
+	default n
+	---help---
+	  Driver framework for Marvell MMP serial SoC ISP.
+	  Say Y here to enable the ISP driver framework, and then ISP driver
+	  must be enabled too.
+	  This framework will support AREA51 and B52 ISP project
+
+config VIDEO_MMPISP_B52SENSOR
+	bool "B52ISP common camera sensor support"
+	depends on VIDEO_MMPISP_B52 && I2C
+	default n
+	---help---
+	  Say Y here to enable b52 common sensor driver.
+	  The framework implements the v4l2 interface.
+	  Each sensor mainly provides the setting to the
+	  framework. The framework will handle the setting.
+
+config VIDEO_MMPISP_B52
+	bool "MMP serial SoC B52 ISP support"
+	depends on VIDEO_MMPISP
+	default n
+	---help---
+	  Say Y here to enable MMP serial SoC B52 ISP driver.
+	  B52 ISP can support both dual pipeline and single
+	  pipeline. The dual pipeline and single pipeline have
+	  different number of MAC.
+
+config VIDEO_MMPISP_CCICV2
+	bool "MMP serial SoC CCIC version 2 support"
+	depends on VIDEO_MMPISP
+	select VIDEO_MV_SC2_CCIC
+	default n
+	---help---
+	  Say Y here to enable MMP serial SoC CCICv2 driver.
+	  SoC CCICv2 driver shares the functions with VIDEO_MV_SC2_CCIC.
+	  CCICv2 provides the media control interfaces.
+	  CCICv2 includes csi-ctrl and csi-dma.
+
+config VIDEO_MMPISP_PLATFORM
+	bool "Marvell Platform Camera support"
+	depends on VIDEO_MMPISP
+	select VIDEO_MMPISP_B52
+	select VIDEO_MMPISP_CCICV2
+	default n
+	---help---
+	  Say Y here to enable Camera driver.
+	  The platform has the overall view of the ISP topology.
+	  It provides the interface to find other linked subdev.
+	  It also detects sensor during the probe.
+
+config VIDEO_MV_SC2_MMU
+	tristate "Marvell SC2 mmu driver"
+	depends on VIDEO_DEV
+	select VIDEOBUF2_DMA_SG
+	---help---
+	  This is a v4l2 driver for the Marvell sc2 MMU
+	  To compile this driver as a module, choose M here: the module will
+	  be called mv_sc2_mmu.
+	  In new Marvell architecture, CCIC/ISP drivers depend on
+	  this driver.
+
+config ISP_USE_TWSI3
+	tristate "Marvell b52 isp use twsi3 as i2c"
+	depends on VIDEO_MMPISP
+	default n
+	---help---
+	  This is a new feture for the Marvell B52 ISP
+	  To compile this driver as a module, choose M here: the module will
+	  be called system i2c module.
+	  In new Marvell SOC architecture, ISP drivers can use it access sensor
+
+config VIDEO_MV_SC2_CCIC
+	tristate "Marvell SC2 ccic driver"
+	select VIDEOBUF2_DMA_SG
+	select VIDEOBUF2_DMA_CONTIG
+	---help---
+	  This is a v4l2 driver for the Marvell sc2 CCIC
+	  To compile this driver as a module, choose M here: the module will
+	  be called mv_sc2_ccic.
+
+config HOST_SUBDEV
+	bool "host v4l2 subdev support"
+	depends on VIDEO_V4L2
+	default n
+	---help---
+	  Host v4l2 subdev provide a container of v4l2 subdevs, it's a way to
+	  map a group of v4l2_subdevs to one v4l2 subdev. This is very usefull
+	  if driver choose to expose a unified interface to user space for
+	  a raw camera sensor and its accessories(like VCM, OTP, etc).
+
+config SUBDEV_VCM
+	bool "v4l2 subdev vcm support"
+	depends on VIDEO_V4L2
+	default n
+	---help---
+	  v4l2 subdev vcm is the subdev of the "host guest" framework, it's a way to
+	  control the vcm throgh the host handler.
+
+config SUBDEV_FLASH
+	bool "v4l2 subdev flash support"
+	depends on VIDEO_V4L2
+	default n
+	---help---
+	  v4l2 subdev flash is the subdev of the "host guest" framework, it's a way to
+	  control the flash throgh the host handler.
+
 source "drivers/media/platform/soc_camera/Kconfig"
 source "drivers/media/platform/exynos4-is/Kconfig"
 source "drivers/media/platform/s5p-tv/Kconfig"

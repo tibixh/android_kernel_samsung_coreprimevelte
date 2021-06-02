@@ -128,6 +128,8 @@ CHECKFLAGS	+= -D__arm__
 #Default value
 head-y		:= arch/arm/kernel/head$(MMUEXT).o
 textofs-y	:= 0x00008000
+textofs-$(CONFIG_TEXT_OFFSET_OVERRIDE)	:= $(CONFIG_TEXT_OFFSET)
+
 textofs-$(CONFIG_ARCH_CLPS711X) := 0x00028000
 # We don't want the htc bootloader to corrupt kernel during resume
 textofs-$(CONFIG_PM_H1940)      := 0x00108000
@@ -277,6 +279,8 @@ libs-y				:= arch/arm/lib/ $(libs-y)
 # Default target when executing plain make
 ifeq ($(CONFIG_XIP_KERNEL),y)
 KBUILD_IMAGE := xipImage
+else ifeq ($(CONFIG_BUILD_ARM_APPENDED_DTB_IMAGE),y)
+KBUILD_IMAGE := zImage-dtb
 else
 KBUILD_IMAGE := zImage
 endif
@@ -313,6 +317,9 @@ $(INSTALL_TARGETS):
 PHONY += dtbs
 dtbs: scripts
 	$(Q)$(MAKE) $(build)=$(boot)/dts MACHINE=$(MACHINE) dtbs
+
+zImage-dtb: vmlinux scripts dtbs
+	$(Q)$(MAKE) $(build)=$(boot) MACHINE=$(MACHINE) $(boot)/$@
 
 # We use MRPROPER_FILES and CLEAN_FILES now
 archclean:

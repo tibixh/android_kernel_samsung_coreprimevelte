@@ -114,6 +114,29 @@ struct ion_handle_data {
 	ion_user_handle_t handle;
 };
 
+#define ION_BUFFER_UNKOWN	0
+#define ION_BUFFER_DMA_VALID	(1 << 0)
+#define ION_BUFFER_CPU_VALID	(1 << 1)
+
+#define ION_BUFFER_NOTIFY_QUERY		0
+#define ION_BUFFER_NOTIFY_DMA_READ	1
+#define ION_BUFFER_NOTIFY_DMA_WRITE	2
+#define ION_BUFFER_NOTIFY_CPU_READ	4
+#define ION_BUFFER_NOTIFY_CPU_WRITE	8
+#define ION_BUFFER_NOTIFY_VARIED	0xF
+
+struct ion_notify_data {
+	int fd;
+	unsigned int note;
+};
+
+struct ion_sync_range_data {
+	int fd;
+	unsigned int offset;
+	unsigned int size;
+	unsigned int note;
+};
+
 /**
  * struct ion_custom_data - metadata passed to/from userspace for a custom ioctl
  * @cmd:	the custom ioctl function to call
@@ -125,6 +148,30 @@ struct ion_handle_data {
 struct ion_custom_data {
 	unsigned int cmd;
 	unsigned long arg;
+};
+
+/**
+ * struct ion_buffer_name_data - passed to/from userspace for a name/fd pair
+ * @fd:		a file descriptor of the buffer exported
+ * @name:	optional name of the buffer
+ */
+#define ION_BUFFER_NAME_LEN	16
+struct ion_buffer_name_data {
+	int fd;
+	char name[ION_BUFFER_NAME_LEN];
+};
+
+#define ION_BUFFER_TYPE_PHYS	(1 << 0)
+#define ION_BUFFER_TYPE_DMA	(1 << 1)
+/**
+ * struct ion_phys_data - passed to/from userspace for a fd/addr pair
+ * @fd:		a file descriptor of the buffer exported
+ * @addr:	phys or dma address of the buffer
+ */
+struct ion_phys_data {
+	int fd;
+	unsigned int addr;
+	unsigned int flags;
 };
 
 #define ION_IOC_MAGIC		'I'
@@ -192,5 +239,33 @@ struct ion_custom_data {
  * passes appropriate userdata for that ioctl
  */
 #define ION_IOC_CUSTOM		_IOWR(ION_IOC_MAGIC, 6, struct ion_custom_data)
+
+/**
+ * DOC: ION_IOC_NAME - assign a name to the buffer
+ *
+ * Takes an ion_buffer_name_data with share_fd and a string name.
+ */
+#define ION_IOC_NAME	_IOWR(ION_IOC_MAGIC, 8, struct ion_buffer_name_data)
+
+/**
+ * DOC: ION_IOC_PHYS - get the physical address or iova of the buffer
+ *
+ * Takes an ion_phys_data with share_fd and returns the address.
+ */
+#define ION_IOC_PHYS		_IOWR(ION_IOC_MAGIC, 9, struct ion_phys_data)
+
+/**
+ * DOC: ION_IOC_NOTIFY - notify the buffer usage type of next operation
+ *
+ * Takes an ion_notify_data with share_fd and the notification.
+ */
+#define ION_IOC_NOTIFY		_IOWR(ION_IOC_MAGIC, 10, struct ion_notify_data)
+
+/**
+ * DOC: ION_IOC_SYNC_RANGE - syncs a shared file descriptors to memory by range
+ *
+ * Takes an ion_sync_range_data with share_fd, buffer offset and size
+ */
+#define ION_IOC_SYNC_RANGE _IOWR(ION_IOC_MAGIC, 11, struct ion_sync_range_data)
 
 #endif /* _UAPI_LINUX_ION_H */

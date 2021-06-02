@@ -4,13 +4,20 @@
 
 88pm860x-objs			:= 88pm860x-core.o 88pm860x-i2c.o
 obj-$(CONFIG_MFD_88PM860X)	+= 88pm860x.o
-obj-$(CONFIG_MFD_88PM800)	+= 88pm800.o 88pm80x.o
+obj-$(CONFIG_MFD_88PM800)	+= 88pm800.o 88pm80x.o 88pm8xx-config.o 88pm8xx-debugfs.o
 obj-$(CONFIG_MFD_88PM805)	+= 88pm805.o 88pm80x.o
+obj-$(CONFIG_MFD_88PM830)	+= 88pm830.o 88pm830-debugfs.o
+obj-$(CONFIG_MFD_88PM8XX_DVC)	+= 88pm8xx-dvc.o
 obj-$(CONFIG_MFD_SM501)		+= sm501.o
 obj-$(CONFIG_MFD_ASIC3)		+= asic3.o tmio_core.o
 obj-$(CONFIG_MFD_CROS_EC)	+= cros_ec.o
 obj-$(CONFIG_MFD_CROS_EC_I2C)	+= cros_ec_i2c.o
 obj-$(CONFIG_MFD_CROS_EC_SPI)	+= cros_ec_spi.o
+obj-$(CONFIG_MFD_MMP_MAP)	+= mmp-map.o
+obj-$(CONFIG_MFD_88PM860)	+= 88pm860-audio.o
+
+88pm88x-objs			:= 88pm88x-core.o 88pm88x-i2c.o 88pm88x-irq.o 88pm88x-dvc.o 88pm88x-debugfs.o 88pm886-table.o 88pm880-table.o
+obj-$(CONFIG_MFD_88PM88X)	+= 88pm88x.o
 
 rtsx_pci-objs			:= rtsx_pcr.o rts5209.o rts5229.o rtl8411.o rts5227.o rts5249.o
 obj-$(CONFIG_MFD_RTSX_PCI)	+= rtsx_pci.o

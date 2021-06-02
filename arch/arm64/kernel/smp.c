@@ -38,6 +38,7 @@
 
 #include <asm/atomic.h>
 #include <asm/cacheflush.h>
+#include <asm/cpu.h>
 #include <asm/cputype.h>
 #include <asm/cpu_ops.h>
 #include <asm/mmu_context.h>
@@ -49,6 +50,9 @@
 #include <asm/tlbflush.h>
 #include <asm/ptrace.h>
 
+#define CREATE_TRACE_POINTS
+#include <trace/events/arm-ipi.h>
+
 /*
  * as from 2.5, kernels no longer have an init_tasks structure
  * so we need some other way of telling a new secondary core
@@ -57,6 +61,7 @@
 struct secondary_data secondary_data;
 
 enum ipi_msg_type {
+	IPI_WAKEUP,
 	IPI_RESCHEDULE,
 	IPI_CALL_FUNC,
 	IPI_CALL_FUNC_SINGLE,
@@ -114,6 +119,11 @@ int __cpu_up(unsigned int cpu, struct task_struct *idle)
 	return ret;
 }
 
+static void smp_store_cpu_info(unsigned int cpuid)
+{
+	store_cpu_topology(cpuid);
+}
+
 /*
  * This is the secondary CPU boot entry.  We're using this CPUs
  * idle thread stack, but a set of temporary page tables.
@@ -148,9 +158,16 @@ asmlinkage void secondary_start_kernel(void)
 		cpu_ops[cpu]->cpu_postboot();
 
 	/*
+	 * Log the CPU info before it is marked online and might get read.
+	 */
+	cpuinfo_store_cpu();
+
+	/*
 	 * Enable GIC and timers.
 	 */
 	notify_cpu_starting(cpu);
+
+	smp_store_cpu_info(cpu);
 
 	/*
 	 * OK, now it's safe to let the boot CPU continue.  Wait for
@@ -390,6 +407,10 @@ void __init smp_prepare_cpus(unsigned int max_cpus)
 	int err;
 	unsigned int cpu, ncores = num_possible_cpus();
 
+	init_cpu_topology();
+
+	smp_store_cpu_info(smp_processor_id());
+
 	/*
 	 * are we trying to boot more cores than exist?
 	 */
@@ -443,8 +464,14 @@ void arch_send_call_function_single_ipi(int cpu)
 	smp_cross_call(cpumask_of(cpu), IPI_CALL_FUNC_SINGLE);
 }
 
+void arch_send_wakeup_ipi_mask(const struct cpumask *mask)
+{
+	smp_cross_call(mask, IPI_WAKEUP);
+}
+
 static const char *ipi_types[NR_IPI] = {
-#define S(x,s)	[x - IPI_RESCHEDULE] = s
+#define S(x,s)	[x - IPI_WAKEUP] = s
+	S(IPI_WAKEUP, "CPU wakeup interrupts"),
 	S(IPI_RESCHEDULE, "Rescheduling interrupts"),
 	S(IPI_CALL_FUNC, "Function call interrupts"),
 	S(IPI_CALL_FUNC_SINGLE, "Single function call interrupts"),
@@ -508,10 +535,13 @@ void handle_IPI(int ipinr, struct pt_regs *regs)
 	unsigned int cpu = smp_processor_id();
 	struct pt_regs *old_regs = set_irq_regs(regs);
 
-	if (ipinr >= IPI_RESCHEDULE && ipinr < IPI_RESCHEDULE + NR_IPI)
-		__inc_irq_stat(cpu, ipi_irqs[ipinr - IPI_RESCHEDULE]);
+	if (ipinr >= IPI_WAKEUP && ipinr < IPI_WAKEUP + NR_IPI)
+		__inc_irq_stat(cpu, ipi_irqs[ipinr - IPI_WAKEUP]);
 
 	switch (ipinr) {
+	case IPI_WAKEUP:
+		break;
+
 	case IPI_RESCHEDULE:
 		scheduler_ipi();
 		break;

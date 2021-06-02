@@ -1,4 +1,8 @@
 snd-soc-88pm860x-objs := 88pm860x-codec.o
+snd-soc-88pm860-objs := 88pm860-codec.o
+snd-soc-88pm800-objs := 88pm800-headset.o
+snd-soc-88pm88x-objs := 88pm88x-headset.o
+snd-soc-88pm805-objs := 88pm805-codec.o
 snd-soc-ab8500-codec-objs := ab8500-codec.o
 snd-soc-ac97-objs := ac97.o
 snd-soc-ad1836-objs := ad1836.o
@@ -124,12 +128,18 @@ snd-soc-wm9705-objs := wm9705.o
 snd-soc-wm9712-objs := wm9712.o
 snd-soc-wm9713-objs := wm9713.o
 snd-soc-wm-hubs-objs := wm_hubs.o
+snd-soc-mmp-map-fe-dai-objs := mmp-map-fe-dai.o
 
 # Amp
 snd-soc-max9877-objs := max9877.o
 snd-soc-tpa6130a2-objs := tpa6130a2.o
 
+obj-$(CONFIG_SND_MMP_MAP_FE_DAI) += snd-soc-mmp-map-fe-dai.o
 obj-$(CONFIG_SND_SOC_88PM860X)	+= snd-soc-88pm860x.o
+obj-$(CONFIG_SND_SOC_88PM860)     += snd-soc-88pm860.o
+obj-$(CONFIG_SND_SOC_88PM800_HS)	+= snd-soc-88pm800.o
+obj-$(CONFIG_SND_SOC_88PM88X_HS)	+= snd-soc-88pm88x.o
+obj-$(CONFIG_SND_SOC_88PM805)	+= snd-soc-88pm805.o
 obj-$(CONFIG_SND_SOC_AB8500_CODEC)	+= snd-soc-ab8500-codec.o
 obj-$(CONFIG_SND_SOC_AC97_CODEC)	+= snd-soc-ac97.o
 obj-$(CONFIG_SND_SOC_AD1836)	+= snd-soc-ad1836.o
@@ -258,3 +268,6 @@ obj-$(CONFIG_SND_SOC_WM_HUBS)	+= snd-soc-wm-hubs.o
 # Amp
 obj-$(CONFIG_SND_SOC_MAX9877)	+= snd-soc-max9877.o
 obj-$(CONFIG_SND_SOC_TPA6130A2)	+= snd-soc-tpa6130a2.o
+
+# KSND Samsung Jack
+obj-$(CONFIG_SAMSUNG_JACK) += sec_jack.o 

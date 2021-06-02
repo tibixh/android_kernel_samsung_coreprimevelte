@@ -360,7 +360,7 @@ static void handle_non_critical_trips(struct thermal_zone_device *tz,
 static void handle_critical_trips(struct thermal_zone_device *tz,
 				int trip, enum thermal_trip_type trip_type)
 {
-	long trip_temp;
+	int trip_temp;
 
 	tz->ops->get_trip_temp(tz, trip, &trip_temp);
 
@@ -406,7 +406,7 @@ static void handle_thermal_trip(struct thermal_zone_device *tz, int trip)
  *
  * Return: On success returns 0, an error code otherwise
  */
-int thermal_zone_get_temp(struct thermal_zone_device *tz, unsigned long *temp)
+int thermal_zone_get_temp(struct thermal_zone_device *tz, int *temp)
 {
 	int ret = -EINVAL;
 #ifdef CONFIG_THERMAL_EMULATION
@@ -448,7 +448,7 @@ EXPORT_SYMBOL_GPL(thermal_zone_get_temp);
 
 static void update_temperature(struct thermal_zone_device *tz)
 {
-	long temp;
+	int temp;
 	int ret;
 
 	ret = thermal_zone_get_temp(tz, &temp);
@@ -506,7 +506,7 @@ static ssize_t
 temp_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	struct thermal_zone_device *tz = to_thermal_zone(dev);
-	long temperature;
+	int temperature;
 	int ret;
 
 	ret = thermal_zone_get_temp(tz, &temperature);
@@ -514,7 +514,7 @@ temp_show(struct device *dev, struct device_attribute *attr, char *buf)
 	if (ret)
 		return ret;
 
-	return sprintf(buf, "%ld\n", temperature);
+	return sprintf(buf, "%d\n", temperature);
 }
 
 static ssize_t
@@ -618,7 +618,7 @@ trip_point_temp_show(struct device *dev, struct device_attribute *attr,
 {
 	struct thermal_zone_device *tz = to_thermal_zone(dev);
 	int trip, ret;
-	long temperature;
+	int temperature;
 
 	if (!tz->ops->get_trip_temp)
 		return -EPERM;
@@ -631,7 +631,7 @@ trip_point_temp_show(struct device *dev, struct device_attribute *attr,
 	if (ret)
 		return ret;
 
-	return sprintf(buf, "%ld\n", temperature);
+	return sprintf(buf, "%d\n", temperature);
 }
 
 static ssize_t
@@ -667,7 +667,7 @@ trip_point_hyst_show(struct device *dev, struct device_attribute *attr,
 {
 	struct thermal_zone_device *tz = to_thermal_zone(dev);
 	int trip, ret;
-	unsigned long temperature;
+	int temperature;
 
 	if (!tz->ops->get_trip_hyst)
 		return -EPERM;
@@ -677,7 +677,7 @@ trip_point_hyst_show(struct device *dev, struct device_attribute *attr,
 
 	ret = tz->ops->get_trip_hyst(tz, trip, &temperature);
 
-	return ret ? ret : sprintf(buf, "%ld\n", temperature);
+	return ret ? ret : sprintf(buf, "%d\n", temperature);
 }
 
 static ssize_t
@@ -745,7 +745,7 @@ policy_store(struct device *dev, struct device_attribute *attr,
 {
 	int ret = -EINVAL;
 	struct thermal_zone_device *tz = to_thermal_zone(dev);
-	struct thermal_governor *gov;
+	struct thermal_governor *gov, *gov_from, *gov_to;
 	char name[THERMAL_NAME_LENGTH];
 
 	snprintf(name, sizeof(name), "%s", buf);
@@ -756,7 +756,16 @@ policy_store(struct device *dev, struct device_attribute *attr,
 	if (!gov)
 		goto exit;
 
+	gov_from = tz->governor;
+	gov_to = gov;
+
 	tz->governor = gov;
+
+	if (gov_from->switch_gov)
+		gov_from->switch_gov(tz, gov_from, gov_to);
+	if (gov_to->switch_gov)
+		gov_to->switch_gov(tz, gov_from, gov_to);
+
 	ret = count;
 
 exit:
@@ -1790,6 +1799,10 @@ static int __init thermal_register_governors(void)
 	if (result)
 		return result;
 
+	result = thermal_gov_bi_direction_register();
+	if (result)
+		return result;
+
 	return thermal_gov_user_space_register();
 }
 
@@ -1797,6 +1810,7 @@ static void thermal_unregister_governors(void)
 {
 	thermal_gov_step_wise_unregister();
 	thermal_gov_fair_share_unregister();
+	thermal_gov_bi_direction_unregister();
 	thermal_gov_user_space_unregister();
 }
 

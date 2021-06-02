@@ -306,6 +306,30 @@ config MFD_88PM805
 	  components like codec device, headset/Mic device under the
 	  corresponding menus.
 
+config MFD_88PM860
+	tristate "Support Marvell 88pm860"
+	depends on I2C=y
+	select REGMAP_I2C
+	select REGMAP_IRQ
+	select MFD_CORE
+	help
+	  This supports for Marvell codec 88PM860. This includes
+	  pm860 codec init and the I2C driver register, you have to select
+	  individual components like codec device, headset/Mic device under
+	  the corresponding menus.
+
+config MFD_88PM830
+	tristate "Marvell 88PM830"
+	depends on I2C=y
+	select REGMAP_I2C
+	select REGMAP_IRQ
+	select MFD_CORE
+	help
+	  This supports for Marvell 88PM830 Power Management IC.
+	  This includes the I2C driver and the core APIs _only_,
+	  you have to select individual components like  battery-charger
+	  under the corresponding menus.
+
 config MFD_88PM860X
 	bool "Marvell 88PM8606/88PM8607"
 	depends on I2C=y
@@ -316,6 +340,29 @@ config MFD_88PM860X
 	  This includes the I2C driver and the core APIs _only_, you have to
 	  select individual components like voltage regulators, RTC and
 	  battery-charger under the corresponding menus.
+
+config MFD_MMP_MAP
+	bool "Support Marvell Audio MAP"
+	select MFD_CORE
+	select REGMAP
+	select REGMAP_MMIO
+	 ---help---
+	  This supports for Marvell Audio MAP (Marvell audio processor).
+	  This includes MAP init, you have to select individual components,
+	  like fe dai (i2s1/2/3/4), be dai (TDM, DEI2S, AUX-I2S)
+	  under the corresponding menus.
+
+config MFD_88PM88X
+	bool "Marvell 88PM88X"
+	depends on I2C=y
+	select REGMAP_I2C
+	select MFD_CORE
+	help
+	  This supports for Marvell 88PM88x Series Power Management IC:
+	  88pm886 and 88pm880;
+	  This includes the I2C driver, the interrupt resource distribution
+	  and the core APIs, for individual components as voltage regulators,
+	  RTC and battery-charger, please select under the corresponding menus.
 
 config MFD_MAX14577
 	bool "Maxim Semiconductor MAX14577 MUIC + Charger Support"
@@ -1192,6 +1239,15 @@ config MFD_STW481X
 	  Select this option to enable the STw481x chip driver used
 	  in various ST Microelectronics and ST-Ericsson embedded
 	  Nomadik series.
+
+config MFD_88PM8XX_DVC
+	bool "Marvell 88PM80x DVC"
+	depends on MFD_88PM800=y
+	help
+	  This driver supports Marvell 88PM800 DVC feature.
+	  It delivers buckx DVC four level's digitally programmable output,
+	  the voltage is programmed via I2C interface.
+	  It's suitable to support PXA988 chips to control VCC_MAIN.
 
 endmenu
 endif

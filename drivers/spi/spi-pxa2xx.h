@@ -21,6 +21,7 @@
 #include <linux/sizes.h>
 #include <linux/spi/spi.h>
 #include <linux/spi/pxa2xx_spi.h>
+#include <linux/pm_qos.h>
 
 struct driver_data {
 	/* Driver model hookup */
@@ -39,6 +40,7 @@ struct driver_data {
 	/* PXA private DMA setup stuff */
 	int rx_channel;
 	int tx_channel;
+	u32 *alloc_dma_buf;
 	u32 *null_dma_buf;
 
 	/* SSP register addresses */
@@ -86,13 +88,23 @@ struct driver_data {
 	int (*read)(struct driver_data *drv_data);
 	irqreturn_t (*transfer_handler)(struct driver_data *drv_data);
 	void (*cs_control)(u32 command);
-
+	struct pm_qos_request qos_idle;
+	int qos_idle_value;
 	void __iomem *lpss_base;
+	bool spi_inc_mode;
+
+#ifdef CONFIG_OF
+	struct clk      *clk;
+	int irq;
+	/* Support RX FIFO auto full control and endian swap */
+	unsigned int ssp_enhancement;
+#endif
 };
 
 struct chip_data {
 	u32 cr0;
 	u32 cr1;
+	u32 cr2;
 	u32 psp;
 	u32 timeout;
 	u8 n_bytes;
@@ -128,6 +140,7 @@ DEFINE_SSP_REG(SSITR, 0x0c)
 DEFINE_SSP_REG(SSDR, 0x10)
 DEFINE_SSP_REG(SSTO, 0x28)
 DEFINE_SSP_REG(SSPSP, 0x2c)
+DEFINE_SSP_REG(SSCR2, 0x44)
 DEFINE_SSP_REG(SSITF, SSITF)
 DEFINE_SSP_REG(SSIRF, SSIRF)
 
@@ -136,8 +149,8 @@ DEFINE_SSP_REG(SSIRF, SSIRF)
 #define DONE_STATE ((void *)2)
 #define ERROR_STATE ((void *)-1)
 
+#define DMA_ALIGNMENT           64
 #define IS_DMA_ALIGNED(x)	IS_ALIGNED((unsigned long)(x), DMA_ALIGNMENT)
-#define DMA_ALIGNMENT		8
 
 static inline int pxa25x_ssp_comp(struct driver_data *drv_data)
 {

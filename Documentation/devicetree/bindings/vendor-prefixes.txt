@@ -38,22 +38,27 @@ fsl	Freescale Semiconductor
 GEFanuc	GE Fanuc Intelligent Platforms Embedded Systems, Inc.
 gef	GE Fanuc Intelligent Platforms Embedded Systems, Inc.
 gmt	Global Mixed-mode Technology, Inc.
+goodix	Goodix Technology.
 gumstix	Gumstix, Inc.
 haoyu	Haoyu Microelectronic Co. Ltd.
 hisilicon	Hisilicon Limited.
 honeywell	Honeywell
 hp	Hewlett Packard
+hynix	HYNIX, Inc.
 ibm	International Business Machines (IBM)
 idt	Integrated Device Technologies, Inc.
 img	Imagination Technologies Ltd.
 intercontrol	Inter Control Group
-isl	Intersil
+invensense	Invensense Technologies
+intersil	Intersil
 karo	Ka-Ro electronics GmbH
 lg	LG Corporation
 linux	Linux-specific binding
 lsi	LSI Corp. (LSI Logic)
 marvell	Marvell Technology Group Ltd.
+mrvl	short for marvell
 maxim	Maxim Integrated Products
+memsic	MEMSIC, Inc.
 microchip	Microchip Technology Inc.
 mosaixtech	Mosaix Technologies, Inc.
 national	National Semiconductor
@@ -62,6 +67,7 @@ nintendo	Nintendo
 nvidia	NVIDIA
 nxp	NXP Semiconductors
 onnn	ON Semiconductor Corp.
+ovt		OmniVision Technology Co.,Ltd
 panasonic	Panasonic Corporation
 phytec	PHYTEC Messtechnik GmbH
 picochip	Picochip Ltd
@@ -81,10 +87,12 @@ silabs	Silicon Laboratories
 simtek
 sirf	SiRF Technology, Inc.
 snps 	Synopsys, Inc.
+sony	Sony corporation
 spansion	Spansion Inc.
 st	STMicroelectronics
 ste	ST-Ericsson
 stericsson	ST-Ericsson
+synaptics	Synaptics
 ti	Texas Instruments
 tlm	Trusted Logic Mobility
 toshiba	Toshiba Corporation
@@ -95,3 +103,5 @@ winbond Winbond Electronics corp.
 wlf	Wolfson Microelectronics
 wm	Wondermedia Technologies, Inc.
 xlnx	Xilinx
+focaltech	focaltech
+simple-bus

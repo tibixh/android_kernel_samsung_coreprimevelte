@@ -41,6 +41,7 @@
 #include <linux/slab.h>
 #include <linux/irqchip/chained_irq.h>
 #include <linux/irqchip/arm-gic.h>
+#include <trace/events/arm-ipi.h>
 
 #include <asm/cputype.h>
 #include <asm/irq.h>
@@ -63,6 +64,7 @@ struct gic_chip_data {
 	u32 saved_spi_target[DIV_ROUND_UP(1020, 4)];
 	u32 __percpu *saved_ppi_enable;
 	u32 __percpu *saved_ppi_conf;
+	bool always_on;
 #endif
 	struct irq_domain *domain;
 	unsigned int gic_irqs;
@@ -99,6 +101,8 @@ struct irq_chip gic_arch_extn = {
 #endif
 
 static struct gic_chip_data gic_data[MAX_GIC_NR] __read_mostly;
+
+bool is_gic_available = true;
 
 #ifdef CONFIG_GIC_NON_BANKED
 static void __iomem *gic_get_percpu_base(union gic_base *base)
@@ -248,7 +252,8 @@ static int gic_set_affinity(struct irq_data *d, const struct cpumask *mask_val,
 {
 	void __iomem *reg = gic_dist_base(d) + GIC_DIST_TARGET + (gic_irq(d) & ~3);
 	unsigned int cpu, shift = (gic_irq(d) % 4) * 8;
-	u32 val, mask, bit;
+	struct irq_desc *desc = container_of(d, struct irq_desc, irq_data);
+	u32 val, mask, bit = 0;
 
 	if (!force)
 		cpu = cpumask_any_and(mask_val, cpu_online_mask);
@@ -259,8 +264,21 @@ static int gic_set_affinity(struct irq_data *d, const struct cpumask *mask_val,
 		return -EINVAL;
 
 	raw_spin_lock(&irq_controller_lock);
+	if (gic_arch_extn.irq_set_affinity)
+		gic_arch_extn.irq_set_affinity(d, mask_val, false);
 	mask = 0xff << shift;
-	bit = gic_cpu_map[cpu] << shift;
+
+	if (unlikely(desc->action && desc->action->flags & IRQF_MULTI_CPUS)) {
+		if (!force) {
+			for_each_cpu_and(cpu, mask_val, cpu_online_mask)
+				bit |= gic_cpu_map[cpu] << shift;
+		} else {
+			for_each_cpu(cpu, mask_val)
+				bit |= gic_cpu_map[cpu] << shift;
+		}
+	} else
+		bit = gic_cpu_map[cpu] << shift;
+
 	val = readl_relaxed(reg) & ~mask;
 	writel_relaxed(val | bit, reg);
 	raw_spin_unlock(&irq_controller_lock);
@@ -482,7 +500,8 @@ static void gic_dist_save(unsigned int gic_nr)
 	gic_irqs = gic_data[gic_nr].gic_irqs;
 	dist_base = gic_data_dist_base(&gic_data[gic_nr]);
 
-	if (!dist_base)
+	/* No need to save/restore gic dist regs if dist power is always on*/
+	if (!dist_base || gic_data[gic_nr].always_on)
 		return;
 
 	for (i = 0; i < DIV_ROUND_UP(gic_irqs, 16); i++)
@@ -517,7 +536,7 @@ static void gic_dist_restore(unsigned int gic_nr)
 	gic_irqs = gic_data[gic_nr].gic_irqs;
 	dist_base = gic_data_dist_base(&gic_data[gic_nr]);
 
-	if (!dist_base)
+	if (!dist_base || gic_data[gic_nr].always_on)
 		return;
 
 	writel_relaxed(0, dist_base + GIC_DIST_CTRL);
@@ -553,8 +572,8 @@ static void gic_cpu_save(unsigned int gic_nr)
 
 	dist_base = gic_data_dist_base(&gic_data[gic_nr]);
 	cpu_base = gic_data_cpu_base(&gic_data[gic_nr]);
-
-	if (!dist_base || !cpu_base)
+	/* No need to save/restore gic cpu regs if dist power is always on*/
+	if (!dist_base || !cpu_base || gic_data[gic_nr].always_on)
 		return;
 
 	ptr = __this_cpu_ptr(gic_data[gic_nr].saved_ppi_enable);
@@ -564,7 +583,6 @@ static void gic_cpu_save(unsigned int gic_nr)
 	ptr = __this_cpu_ptr(gic_data[gic_nr].saved_ppi_conf);
 	for (i = 0; i < DIV_ROUND_UP(32, 16); i++)
 		ptr[i] = readl_relaxed(dist_base + GIC_DIST_CONFIG + i * 4);
-
 }
 
 static void gic_cpu_restore(unsigned int gic_nr)
@@ -580,7 +598,7 @@ static void gic_cpu_restore(unsigned int gic_nr)
 	dist_base = gic_data_dist_base(&gic_data[gic_nr]);
 	cpu_base = gic_data_cpu_base(&gic_data[gic_nr]);
 
-	if (!dist_base || !cpu_base)
+	if (!dist_base || !cpu_base || gic_data[gic_nr].always_on)
 		return;
 
 	ptr = __this_cpu_ptr(gic_data[gic_nr].saved_ppi_enable);
@@ -661,8 +679,10 @@ void gic_raise_softirq(const struct cpumask *mask, unsigned int irq)
 	raw_spin_lock_irqsave(&irq_controller_lock, flags);
 
 	/* Convert our logical CPU mask into a physical one. */
-	for_each_cpu(cpu, mask)
+	for_each_cpu(cpu, mask) {
+		trace_arm_ipi_send(irq, cpu);
 		map |= gic_cpu_map[cpu];
+	}
 
 	/*
 	 * Ensure that stores to Normal memory are visible to the
@@ -980,19 +1000,41 @@ void __init gic_init_bases(unsigned int gic_nr, int irq_start,
 
 #ifdef CONFIG_OF
 static int gic_cnt __initdata;
+static void __iomem *gic_dist_base_addr;
+static unsigned long dist_base_phy;
+
+unsigned long gic_dist_base_phys(void)
+{
+	return dist_base_phy;
+}
+void __iomem *gic_get_dist_base(void)
+{
+	return gic_dist_base_addr;
+}
 
 int __init gic_of_init(struct device_node *node, struct device_node *parent)
 {
 	void __iomem *cpu_base;
 	void __iomem *dist_base;
-	u32 percpu_offset;
+	u32 percpu_offset, reg;
 	int irq;
+	const char *power_domain;
 
 	if (WARN_ON(!node))
 		return -ENODEV;
 
+	if (!of_device_is_available(node)) {
+		is_gic_available = false;
+		return -ENODEV;
+	}
+
 	dist_base = of_iomap(node, 0);
 	WARN(!dist_base, "unable to map gic dist registers\n");
+	gic_dist_base_addr = dist_base;
+
+
+	of_property_read_u32(node, "reg", &reg);
+	dist_base_phy = reg;
 
 	cpu_base = of_iomap(node, 1);
 	WARN(!cpu_base, "unable to map gic cpu registers\n");
@@ -1004,6 +1046,14 @@ int __init gic_of_init(struct device_node *node, struct device_node *parent)
 	if (!gic_cnt)
 		gic_init_physaddr(node);
 
+#ifdef CONFIG_CPU_PM
+	power_domain = of_get_property(node, "power-domain", NULL);
+	if (power_domain && !strcmp(power_domain, "always-on"))
+		gic_data[gic_cnt].always_on = true;
+	else
+		gic_data[gic_cnt].always_on = false;
+#endif
+
 	if (parent) {
 		irq = irq_of_parse_and_map(node, 0);
 		gic_cascade_irq(gic_cnt, irq);
@@ -1013,8 +1063,8 @@ int __init gic_of_init(struct device_node *node, struct device_node *parent)
 }
 IRQCHIP_DECLARE(gic_400, "arm,gic-400", gic_of_init);
 IRQCHIP_DECLARE(cortex_a15_gic, "arm,cortex-a15-gic", gic_of_init);
-IRQCHIP_DECLARE(cortex_a9_gic, "arm,cortex-a9-gic", gic_of_init);
 IRQCHIP_DECLARE(cortex_a7_gic, "arm,cortex-a7-gic", gic_of_init);
+IRQCHIP_DECLARE(cortex_a9_gic, "arm,cortex-a9-gic", gic_of_init);
 IRQCHIP_DECLARE(msm_8660_qgic, "qcom,msm-8660-qgic", gic_of_init);
 IRQCHIP_DECLARE(msm_qgic2, "qcom,msm-qgic2", gic_of_init);
 

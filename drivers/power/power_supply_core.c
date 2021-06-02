@@ -15,7 +15,6 @@
 #include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/device.h>
-#include <linux/notifier.h>
 #include <linux/err.h>
 #include <linux/power_supply.h>
 #include <linux/thermal.h>
@@ -24,9 +23,6 @@
 /* exported for the APM Power driver, APM emulation */
 struct class *power_supply_class;
 EXPORT_SYMBOL_GPL(power_supply_class);
-
-ATOMIC_NOTIFIER_HEAD(power_supply_notifier);
-EXPORT_SYMBOL_GPL(power_supply_notifier);
 
 static struct device_type power_supply_dev_type;
 
@@ -81,11 +77,12 @@ static void power_supply_changed_work(struct work_struct *work)
 	if (psy->changed) {
 		psy->changed = false;
 		spin_unlock_irqrestore(&psy->changed_lock, flags);
+
 		class_for_each_device(power_supply_class, NULL, psy,
 				      __power_supply_changed_work);
+
 		power_supply_update_leds(psy);
-		atomic_notifier_call_chain(&power_supply_notifier,
-				PSY_EVENT_PROP_CHANGED, psy);
+
 		kobject_uevent(&psy->dev->kobj, KOBJ_CHANGE);
 		spin_lock_irqsave(&psy->changed_lock, flags);
 	}
@@ -103,7 +100,7 @@ void power_supply_changed(struct power_supply *psy)
 {
 	unsigned long flags;
 
-	dev_dbg(psy->dev, "%s\n", __func__);
+	dev_info(psy->dev, "%s\n", __func__);
 
 	spin_lock_irqsave(&psy->changed_lock, flags);
 	psy->changed = true;
@@ -341,32 +338,6 @@ struct power_supply *power_supply_get_by_name(const char *name)
 }
 EXPORT_SYMBOL_GPL(power_supply_get_by_name);
 
-#ifdef CONFIG_OF
-static int power_supply_match_device_node(struct device *dev, const void *data)
-{
-	return dev->parent && dev->parent->of_node == data;
-}
-
-struct power_supply *power_supply_get_by_phandle(struct device_node *np,
-							const char *property)
-{
-	struct device_node *power_supply_np;
-	struct device *dev;
-
-	power_supply_np = of_parse_phandle(np, property, 0);
-	if (!power_supply_np)
-		return ERR_PTR(-ENODEV);
-
-	dev = class_find_device(power_supply_class, NULL, power_supply_np,
-						power_supply_match_device_node);
-
-	of_node_put(power_supply_np);
-
-	return dev ? dev_get_drvdata(dev) : NULL;
-}
-EXPORT_SYMBOL_GPL(power_supply_get_by_phandle);
-#endif /* CONFIG_OF */
-
 int power_supply_powers(struct power_supply *psy, struct device *dev)
 {
 	return sysfs_create_link(&psy->dev->kobj, &dev->kobj, "powers");
@@ -379,21 +350,9 @@ static void power_supply_dev_release(struct device *dev)
 	kfree(dev);
 }
 
-int power_supply_reg_notifier(struct notifier_block *nb)
-{
-	return atomic_notifier_chain_register(&power_supply_notifier, nb);
-}
-EXPORT_SYMBOL_GPL(power_supply_reg_notifier);
-
-void power_supply_unreg_notifier(struct notifier_block *nb)
-{
-	atomic_notifier_chain_unregister(&power_supply_notifier, nb);
-}
-EXPORT_SYMBOL_GPL(power_supply_unreg_notifier);
-
 #ifdef CONFIG_THERMAL
 static int power_supply_read_temp(struct thermal_zone_device *tzd,
-		unsigned long *temp)
+		int *temp)
 {
 	struct power_supply *psy;
 	union power_supply_propval val;
@@ -555,10 +514,6 @@ int power_supply_register(struct device *parent, struct power_supply *psy)
 	dev_set_drvdata(dev, psy);
 	psy->dev = dev;
 
-	rc = dev_set_name(dev, "%s", psy->name);
-	if (rc)
-		goto dev_set_name_failed;
-
 	INIT_WORK(&psy->changed_work, power_supply_changed_work);
 
 	rc = power_supply_check_supplies(psy);
@@ -567,14 +522,18 @@ int power_supply_register(struct device *parent, struct power_supply *psy)
 		goto check_supplies_failed;
 	}
 
-	spin_lock_init(&psy->changed_lock);
-	rc = device_init_wakeup(dev, true);
+	rc = kobject_set_name(&dev->kobj, "%s", psy->name);
 	if (rc)
-		goto wakeup_init_failed;
+		goto kobject_set_name_failed;
 
 	rc = device_add(dev);
 	if (rc)
 		goto device_add_failed;
+
+	spin_lock_init(&psy->changed_lock);
+	rc = device_init_wakeup(dev, true);
+	if (rc)
+		goto wakeup_init_failed;
 
 	rc = psy_register_thermal(psy);
 	if (rc)
@@ -597,11 +556,11 @@ create_triggers_failed:
 register_cooler_failed:
 	psy_unregister_thermal(psy);
 register_thermal_failed:
-	device_del(dev);
-device_add_failed:
 wakeup_init_failed:
+	device_del(dev);
+kobject_set_name_failed:
+device_add_failed:
 check_supplies_failed:
-dev_set_name_failed:
 	put_device(dev);
 success:
 	return rc;

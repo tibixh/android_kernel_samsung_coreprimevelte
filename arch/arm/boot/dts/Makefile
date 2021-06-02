@@ -118,6 +118,7 @@ dtb-$(CONFIG_ARCH_KIRKWOOD) += kirkwood-cloudbox.dtb \
 	kirkwood-ts219-6281.dtb \
 	kirkwood-ts219-6282.dtb
 dtb-$(CONFIG_ARCH_MARCO) += marco-evb.dtb
+dtb-$(CONFIG_ARCH_MMP) += pxa1U88-dkb.dtb pxa1L88-dkb-v10.dtb pxa1L88-dkb-v20.dtb pxa1L88-tablet-v10.dtb
 dtb-$(CONFIG_ARCH_MOXART) += moxart-uc7112lx.dtb
 dtb-$(CONFIG_ARCH_MSM) += qcom-msm8660-surf.dtb \
 	qcom-msm8960-cdp.dtb \
@@ -323,13 +324,20 @@ dtb-$(CONFIG_ARCH_ZYNQ) += zynq-zc702.dtb \
 	zynq-zc706.dtb \
 	zynq-zed.dtb
 
+DTB_NAMES := $(subst $\",,$(CONFIG_BUILD_ARM_APPENDED_DTB_IMAGE_NAMES))
+ifneq ($(DTB_NAMES),)
+DTB_LIST := $(addsuffix .dtb,$(DTB_NAMES))
+else
+DTB_LIST := $(dtb-y)
+endif
+
 targets += dtbs
-targets += $(dtb-y)
+targets += $(DTB_LIST)
 endif
 
 # *.dtb used to be generated in the directory above. Clean out the
 # old build results so people don't accidentally use them.
-dtbs: $(addprefix $(obj)/, $(dtb-y))
+dtbs: $(addprefix $(obj)/, $(DTB_LIST))
 	$(Q)rm -f $(obj)/../*.dtb
 
 clean-files := *.dtb

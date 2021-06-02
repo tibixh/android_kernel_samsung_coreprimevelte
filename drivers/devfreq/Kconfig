@@ -63,6 +63,16 @@ config DEVFREQ_GOV_USERSPACE
 	  Otherwise, the governor does not change the frequnecy
 	  given at the initialization.
 
+config DEVFREQ_GOV_THROUGHPUT
+	tristate "Throughput"
+	help
+	  Set frequency based on recent throughput (e.g. MB/s).
+	  A device with throughput governor should provide current throughput
+	  value and available freq table. The throughput governor will choose
+	  a proper frequency according to current throughput. A device may
+	  provide tuned values to the governor with data field at
+	  devfreq_add_device().
+
 comment "DEVFREQ Drivers"
 
 config ARM_EXYNOS4_BUS_DEVFREQ
@@ -87,5 +97,18 @@ config ARM_EXYNOS5_BUS_DEVFREQ
 	  This adds the DEVFREQ driver for Exynos5250 bus interface (vdd_int).
 	  It reads PPMU counters of memory controllers and adjusts the
 	  operating frequencies and voltages with OPP support.
+
+config DDR_DEVFREQ
+	bool "DDR devfreq driver support"
+	help
+	  This adds the DEVFREQ driver for McKinley DDR memory bus. It reads
+	  performance counters of memory controller and adjusts the DDR
+	  frequencies.
+
+config VPU_DEVFREQ
+	bool "VPU devfreq driver support"
+	help
+	  This adds the DEVFREQ driver for Marvell Soc's VPU.
+	  It supports several governors, including simple-ondemand governor.
 
 endif # PM_DEVFREQ

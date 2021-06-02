@@ -6,6 +6,19 @@ menu "Character devices"
 
 source "drivers/tty/Kconfig"
 
+config DEVMEM
+	bool "Memory device driver"
+	default y
+	help
+	  The memory driver provides two character devices, mem and kmem, which
+	  provide access to the system's memory. The mem device is a view of
+	  physical memory, and each byte in the device corresponds to the
+	  matching physical address. The kmem device is the same as mem, but
+	  the addresses correspond to the kernel's virtual address space rather
+	  than physical memory. These devices are standard parts of a Linux
+	  system and most users should say Y here. You might say N if very
+	  security conscience or memory is tight.
+
 config DEVKMEM
 	bool "/dev/kmem virtual device support"
 	default y
@@ -579,6 +592,10 @@ config DEVPORT
 	depends on ISA || PCI
 	default y
 
+config DCC_TTY
+	tristate "DCC tty driver"
+	depends on ARM
+
 source "drivers/s390/char/Kconfig"
 
 config MSM_SMD_PKT
@@ -588,6 +605,58 @@ config MSM_SMD_PKT
 	help
 	  Enables userspace clients to read and write to some packet SMD
 	  ports via device interface for MSM chipset.
+
+config VIBRATOR_88PM80X
+        tristate "88pm80X based vibrator"
+        depends on MFD_88PM800
+        depends on ANDROID_TIMED_OUTPUT
+        default y
+        help
+          Say Y here to enable Marvell pmic vibrator driver, actually it uses
+	  the pwm module in pmic;
+	  This driver can cover 88pm800/88pm822 and the later
+	  Marvell pmic.
+
+config VBUS_88PM80X
+	tristate "Marvell VBUS 88PM80x PMIC support"
+	depends on MFD_88PM800
+	help
+	Say Y here if you have a 88PM80X PMIC to detect USB Vbus/IDpin event.
+	If unsure, say N.
+
+	To compile this driver as a module, choose M here: the module will
+	be called 88pm80x_vbus.
+
+config VBUS_88PM830
+	tristate "Marvell VBUS 88PM830 PMIC support"
+	depends on MFD_88PM830
+	help
+	  Say Y here if you have a 88PM830 charger/fuel-gauge IC to detect
+	  USB Vbus/IDpin event.
+	  If unsure, say N.
+	  This driver can be used by vbus detection and otg booster for usb
+	  subsystem.
+
+config VBUS_88PM88X
+	tristate "Marvell VBUS 88PM88X PMIC/charger/fuel-gauge support"
+	depends on MFD_88PM88X
+	help
+	  Say Y here if you have a 88PM88X PMIC/charger/fuel-gauge IC to detect
+	  USB Vbus/IDpin event.
+	  If unsure, say N.
+	  This driver can be used by vbus detection and otg booster for usb
+	  subsystem.
+
+config VIBRATOR_DRV2604
+	tristate "drv2604 based vibrator"
+	depends on I2C=y
+	depends on ANDROID_TIMED_OUTPUT
+	default n
+	help
+		Say Y here if you want to enable drv2604 vibrator driver
+		DRV2604 is an I2c device responsible to controll the vibration
+		actuator.
+		It can be activated by internal trigger or by GPIO trigger.
 
 config TILE_SROM
 	bool "Character-device access via hypervisor to the Tilera SPI ROM"
@@ -600,5 +669,31 @@ config TILE_SROM
 	  device appear much like a simple EEPROM, and knows
 	  how to partition a single ROM for multiple purposes.
 
+config PXA9XX_AMIPC
+       tristate "PXA9xx AM-IPC Driver"
+       depends on ARCH_MMP
+       help
+         Please say Y here if want to support Application to
+         CM3 coprocessor communication on PXA1U88
+
+config VIBRATOR_PWM
+	tristate "PWM based vibrator"
+	depends on ANDROID_TIMED_OUTPUT
+	default y
+	help
+	  Say Y here if you want to support Application to
+	  have vibrator feature
+	  The pwm supllied by the PWM3 pin on PXA1928 chip
+	  If unsusre, say N.
+
+config PXA9XX_ACIPC
+	tristate "PXA9xx AC-IPC Driver"
+	depends on ARCH_MMP
+	help
+	  Please say Y here if want to support Application to
+	  Communication Intel-Processor Communication on PXA988,
+	  PXA1088, PXA1U88 and PXA1928.
+
+source "drivers/char/maxscend/Kconfig"
 endmenu
 

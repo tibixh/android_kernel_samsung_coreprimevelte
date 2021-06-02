@@ -16,4 +16,10 @@
 
 int psci_init(void);
 
+enum affinity_level {
+	AFFINITY_LEVEL0,
+	AFFINITY_LEVEL1,
+	AFFINITY_LEVEL2,
+};
+
 #endif /* __ASM_PSCI_H */

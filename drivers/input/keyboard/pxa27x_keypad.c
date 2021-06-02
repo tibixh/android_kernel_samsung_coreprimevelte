@@ -26,13 +26,20 @@
 #include <linux/err.h>
 #include <linux/input/matrix_keypad.h>
 #include <linux/slab.h>
+#include <linux/delay.h>
+#include <linux/workqueue.h>
+#include <linux/pm_qos.h>
 #include <linux/of.h>
 
 #include <asm/mach/arch.h>
-#include <asm/mach/map.h>
 
+#ifndef CONFIG_ARM64
+#include <asm/mach/map.h>
 #include <mach/hardware.h>
+#endif
+
 #include <linux/platform_data/keypad-pxa27x.h>
+#include <linux/edge_wakeup_mmp.h>
 /*
  * Keypad Controller registers
  */
@@ -87,6 +94,8 @@
 #define KPAS_SO         (0x1 << 31)
 #define KPASMKPx_SO     (0x1 << 31)
 
+#define KPAS_SCANON     (0x1 << 31)
+
 #define KPAS_MUKP(n)	(((n) >> 26) & 0x1f)
 #define KPAS_RP(n)	(((n) >> 4) & 0xf)
 #define KPAS_CP(n)	((n) & 0xf)
@@ -113,9 +122,17 @@ struct pxa27x_keypad {
 
 	/* state row bits of each column scan */
 	uint32_t matrix_key_state[MAX_MATRIX_KEY_COLS];
+	uint32_t row_shift;
 	uint32_t direct_key_state;
 
 	unsigned int direct_key_mask;
+	struct pm_qos_request qos_idle;
+	int qos_idle_value;
+	bool keypad_lpm_mode;
+	struct work_struct	keypad_lpm_work;
+	struct workqueue_struct	*keypad_lpm_wq;
+	int gpio_wakeup[MAX_KEYPAD_KEYS];
+	int maped_key[MAX_KEYPAD_KEYS];
 };
 
 #ifdef CONFIG_OF
@@ -124,12 +141,18 @@ static int pxa27x_keypad_matrix_key_parse_dt(struct pxa27x_keypad *keypad,
 {
 	struct input_dev *input_dev = keypad->input_dev;
 	struct device *dev = input_dev->dev.parent;
-	u32 rows, cols;
+	u32 rows = 0, cols = 0;
 	int error;
+	struct device_node *np = dev->of_node;
 
-	error = matrix_keypad_parse_of_params(dev, &rows, &cols);
-	if (error)
-		return error;
+	if (np) {
+		of_property_read_u32(np, "keypad,num-rows", &rows);
+		of_property_read_u32(np, "keypad,num-columns", &cols);
+		if (!rows || !cols)
+			return 0;
+	} else {
+		return 0;
+	}
 
 	if (rows > MAX_MATRIX_KEY_ROWS || cols > MAX_MATRIX_KEY_COLS) {
 		dev_err(dev, "rows or cols exceeds maximum value\n");
@@ -139,6 +162,7 @@ static int pxa27x_keypad_matrix_key_parse_dt(struct pxa27x_keypad *keypad,
 	pdata->matrix_key_rows = rows;
 	pdata->matrix_key_cols = cols;
 
+	keypad->row_shift = get_count_order(pdata->matrix_key_cols);
 	error = matrix_keypad_build_keymap(NULL, NULL,
 					   pdata->matrix_key_rows,
 					   pdata->matrix_key_cols,
@@ -155,7 +179,7 @@ static int pxa27x_keypad_direct_key_parse_dt(struct pxa27x_keypad *keypad,
 	struct input_dev *input_dev = keypad->input_dev;
 	struct device *dev = input_dev->dev.parent;
 	struct device_node *np = dev->of_node;
-	const __be16 *prop;
+	const __be32 *prop;
 	unsigned short code;
 	unsigned int proplen, size;
 	int i;
@@ -191,17 +215,17 @@ static int pxa27x_keypad_direct_key_parse_dt(struct pxa27x_keypad *keypad,
 	if (!prop)
 		return -EINVAL;
 
-	if (proplen % sizeof(u16))
+	if (proplen % sizeof(u32))
 		return -EINVAL;
 
-	size = proplen / sizeof(u16);
+	size = proplen / sizeof(u32);
 
 	/* Only MAX_DIRECT_KEY_NUM is accepted.*/
 	if (size > MAX_DIRECT_KEY_NUM)
 		return -EINVAL;
 
 	for (i = 0; i < size; i++) {
-		code = be16_to_cpup(prop + i);
+		code = be32_to_cpup(prop + i);
 		keypad->keycodes[MAX_MATRIX_KEY_NUM + i] = code;
 		__set_bit(code, input_dev->keybit);
 	}
@@ -223,8 +247,14 @@ static int pxa27x_keypad_rotary_parse_dt(struct pxa27x_keypad *keypad,
 	struct device_node *np = dev->of_node;
 
 	relkey_ret = of_property_read_u32(np, relkeyname, &code);
-	/* if can read correct rotary key-code, we do not need this. */
-	if (relkey_ret == 0) {
+	if (relkey_ret) {
+		/*
+		 * If do not have marvel,rotary-rel-key defined,
+		 * it means rotary key is not supported.
+		 */
+		return relkey_ret == -EINVAL ? 0 : relkey_ret;
+	} else {
+		/* if can read correct rotary key-code, we do not need this. */
 		unsigned short relcode;
 
 		/* rotary0 taks lower half, rotary1 taks upper half. */
@@ -359,6 +389,7 @@ static int pxa27x_keypad_build_keycode(struct pxa27x_keypad *keypad)
 	if (error)
 		return error;
 
+	keypad->row_shift = get_count_order(pdata->matrix_key_cols);
 	/*
 	 * The keycodes may not only include matrix keys but also the direct
 	 * or rotary keys.
@@ -425,7 +456,9 @@ static void pxa27x_keypad_scan_matrix(struct pxa27x_keypad *keypad)
 
 	if (num_keys_pressed == 0)
 		goto scan;
-
+	/* do not scan more than three keys to avoid fake key */
+	if (num_keys_pressed > 3)
+		return;
 	if (num_keys_pressed == 1) {
 		col = KPAS_CP(kpas);
 		row = KPAS_RP(kpas);
@@ -467,7 +500,8 @@ scan:
 			if ((bits_changed & (1 << row)) == 0)
 				continue;
 
-			code = MATRIX_SCAN_CODE(row, col, MATRIX_ROW_SHIFT);
+			code = MATRIX_SCAN_CODE(row, col, keypad->row_shift);
+
 			input_event(input_dev, EV_MSC, MSC_SCAN, code);
 			input_report_key(input_dev, keypad->keycodes[code],
 					 new_state[col] & (1 << row));
@@ -559,7 +593,6 @@ static void pxa27x_keypad_scan_direct(struct pxa27x_keypad *keypad)
 	for (i = 0; i < pdata->direct_key_num; i++) {
 		if (bits_changed & (1 << i)) {
 			int code = MAX_MATRIX_KEY_NUM + i;
-
 			input_event(input_dev, EV_MSC, MSC_SCAN, code);
 			input_report_key(input_dev, keypad->keycodes[code],
 					 new_state & (1 << i));
@@ -577,19 +610,62 @@ static void clear_wakeup_event(struct pxa27x_keypad *keypad)
 		(pdata->clear_wakeup_event)();
 }
 
+static void pxa27x_keypad_wq_func(struct work_struct *work)
+{
+	struct pxa27x_keypad *keypad = container_of(work, struct pxa27x_keypad,
+					keypad_lpm_work);
+	u32 kpc, kpc_as;
+	int retries = 5;
+	while (retries) {
+		retries--;
+		kpc_as = keypad_readl(KPAS);
+		/* test if last auto scan is finish */
+		if (kpc_as & KPAS_SCANON)
+			usleep_range(2000, 2010);
+		else {
+			keypad_writel(KPC, keypad_readl(KPC) | KPC_AS);
+			break;
+		}
+	}
+	if (unlikely(retries == 0))
+		return;
+	retries = 5;
+	if (keypad->qos_idle_value != PM_QOS_CPUIDLE_BLOCK_DEFAULT_VALUE)
+		pm_qos_update_request(&keypad->qos_idle,
+				keypad->qos_idle_value);
+
+	if (keypad->qos_idle_value != PM_QOS_CPUIDLE_BLOCK_DEFAULT_VALUE)
+		pm_qos_update_request(&keypad->qos_idle,
+				PM_QOS_CPUIDLE_BLOCK_DEFAULT_VALUE);
+
+	do {
+		retries--;
+		usleep_range(2000, 2010);
+		kpc = keypad_readl(KPC);
+	} while ((kpc & KPC_AS) && retries);
+
+	if (kpc & KPC_ME)
+		pxa27x_keypad_scan_matrix(keypad);
+
+	if (kpc & KPC_DE)
+		pxa27x_keypad_scan_direct(keypad);
+}
+
 static irqreturn_t pxa27x_keypad_irq_handler(int irq, void *dev_id)
 {
 	struct pxa27x_keypad *keypad = dev_id;
 	unsigned long kpc = keypad_readl(KPC);
 
 	clear_wakeup_event(keypad);
+	if (keypad->keypad_lpm_mode) {
+		queue_work(keypad->keypad_lpm_wq, &keypad->keypad_lpm_work);
+	} else {
+		if (kpc & KPC_DI)
+			pxa27x_keypad_scan_direct(keypad);
 
-	if (kpc & KPC_DI)
-		pxa27x_keypad_scan_direct(keypad);
-
-	if (kpc & KPC_MI)
-		pxa27x_keypad_scan_matrix(keypad);
-
+		if (kpc & KPC_MI)
+			pxa27x_keypad_scan_matrix(keypad);
+	}
 	return IRQ_HANDLED;
 }
 
@@ -668,6 +744,9 @@ static int pxa27x_keypad_suspend(struct device *dev)
 	struct platform_device *pdev = to_platform_device(dev);
 	struct pxa27x_keypad *keypad = platform_get_drvdata(pdev);
 
+	/* guarantee workqueue finish after suspend */
+	if (keypad->keypad_lpm_mode)
+		flush_work(&keypad->keypad_lpm_work);
 	/*
 	 * If the keypad is used a wake up source, clock can not be disabled.
 	 * Or it can not detect the key pressing.
@@ -676,7 +755,6 @@ static int pxa27x_keypad_suspend(struct device *dev)
 		enable_irq_wake(keypad->irq);
 	else
 		clk_disable_unprepare(keypad->clk);
-
 	return 0;
 }
 
@@ -703,7 +781,6 @@ static int pxa27x_keypad_resume(struct device *dev)
 
 		mutex_unlock(&input_dev->mutex);
 	}
-
 	return 0;
 }
 #endif
@@ -711,6 +788,22 @@ static int pxa27x_keypad_resume(struct device *dev)
 static SIMPLE_DEV_PM_OPS(pxa27x_keypad_pm_ops,
 			 pxa27x_keypad_suspend, pxa27x_keypad_resume);
 
+void trigger_keypad_wakeup(int gpio, void *data)
+{
+	int i, code = 0;
+	struct pxa27x_keypad *keypad = (struct pxa27x_keypad *)data;
+	struct input_dev *input_dev = keypad->input_dev;
+	for (i = 0; i < MAX_KEYPAD_KEYS; i++) {
+		if (gpio == keypad->gpio_wakeup[i]) {
+			code = keypad->maped_key[i];
+			break;
+		}
+	}
+	input_report_key(input_dev, code, 1);
+	input_report_key(input_dev, code, 0);
+	input_sync(input_dev);
+	return;
+}
 
 static int pxa27x_keypad_probe(struct platform_device *pdev)
 {
@@ -721,6 +814,9 @@ static int pxa27x_keypad_probe(struct platform_device *pdev)
 	struct input_dev *input_dev;
 	struct resource *res;
 	int irq, error;
+	const __be32 *prop, *prop_map;
+	unsigned int proplen, proplen_map;
+	int size, i, ret;
 
 	/* Driver need build keycode from device tree or pdata */
 	if (!np && !pdata)
@@ -764,7 +860,7 @@ static int pxa27x_keypad_probe(struct platform_device *pdev)
 		goto failed_free_mem;
 	}
 
-	keypad->clk = clk_get(&pdev->dev, NULL);
+	keypad->clk = devm_clk_get(&pdev->dev, NULL);
 	if (IS_ERR(keypad->clk)) {
 		dev_err(&pdev->dev, "failed to get keypad clock\n");
 		error = PTR_ERR(keypad->clk);
@@ -807,27 +903,73 @@ static int pxa27x_keypad_probe(struct platform_device *pdev)
 		input_dev->evbit[0] |= BIT_MASK(EV_REL);
 	}
 
-	error = request_irq(irq, pxa27x_keypad_irq_handler, 0,
-			    pdev->name, keypad);
-	if (error) {
-		dev_err(&pdev->dev, "failed to request IRQ\n");
-		goto failed_put_clk;
-	}
-
 	/* Register the input device */
 	error = input_register_device(input_dev);
 	if (error) {
 		dev_err(&pdev->dev, "failed to register input device\n");
-		goto failed_free_irq;
+		goto failed_put_clk;
 	}
 
-	platform_set_drvdata(pdev, keypad);
-	device_init_wakeup(&pdev->dev, 1);
+	keypad->qos_idle.name = pdev->name;
+	pm_qos_add_request(&keypad->qos_idle, PM_QOS_CPUIDLE_BLOCK,
+			PM_QOS_CPUIDLE_BLOCK_DEFAULT_VALUE);
+	prop = of_get_property(np, "lpm-qos", &proplen);
+	if (!prop) {
+		dev_err(&pdev->dev, "lpm-qos for keypad is not defined!\n");
+		goto failed_get_property;
+	} else
+		keypad->qos_idle_value = be32_to_cpup(prop);
 
+	keypad->keypad_lpm_mode = of_property_read_bool(np,
+					"marvell,keypad-lpm-mod");
+	if (keypad->keypad_lpm_mode) {
+		INIT_WORK(&keypad->keypad_lpm_work, pxa27x_keypad_wq_func);
+		keypad->keypad_lpm_wq = create_workqueue("keypad_rx_lpm_wq");
+		if (unlikely(keypad->keypad_lpm_wq == NULL))
+			dev_err(&pdev->dev,
+				"[keypad] warning: create work queue failed\n");
+	}
+	/*
+	* marvell,keypad-edge-wakeup function is required by SS,
+	* it won't be enabled by default.
+	*/
+	prop = of_get_property(np, "marvell,edge-wakeup-gpio", &proplen);
+	prop_map = of_get_property(np, "marvell,keypad-map", &proplen_map);
+	if (prop && prop_map) {
+		size = proplen / sizeof(u32);
+		if (size > MAX_KEYPAD_KEYS) {
+			dev_err(&pdev->dev,
+				"too many gpio wake up pin setting\n");
+			goto failed_get_property;
+		}
+		for (i = 0; i < size; i++) {
+			keypad->gpio_wakeup[i] = be32_to_cpup(prop + i);
+			keypad->maped_key[i] = be32_to_cpup(prop_map + i);
+			ret = request_mfp_edge_wakeup(keypad->gpio_wakeup[i],
+					trigger_keypad_wakeup, keypad,
+					&pdev->dev);
+			if (ret) {
+				dev_err(&pdev->dev,
+					"failed to register edge wakeup\n");
+				goto failed_mfp_wakeup;
+			}
+		}
+	}
+	platform_set_drvdata(pdev, keypad);
+	device_set_wakeup_capable(&pdev->dev, 1);
+
+	error = request_irq(irq, pxa27x_keypad_irq_handler, 0,
+			    pdev->name, keypad);
+	if (error) {
+		dev_err(&pdev->dev, "failed to request IRQ\n");
+		goto failed_input_device;
+	}
 	return 0;
 
-failed_free_irq:
-	free_irq(irq, keypad);
+failed_input_device:
+failed_mfp_wakeup:
+failed_get_property:
+	input_unregister_device(keypad->input_dev);
 failed_put_clk:
 	clk_put(keypad->clk);
 failed_free_io:
@@ -844,6 +986,7 @@ static int pxa27x_keypad_remove(struct platform_device *pdev)
 {
 	struct pxa27x_keypad *keypad = platform_get_drvdata(pdev);
 	struct resource *res;
+	int i, ret;
 
 	free_irq(keypad->irq, keypad);
 	clk_put(keypad->clk);
@@ -851,8 +994,18 @@ static int pxa27x_keypad_remove(struct platform_device *pdev)
 	input_unregister_device(keypad->input_dev);
 	iounmap(keypad->mmio_base);
 
+	for (i = 0; i < MAX_KEYPAD_KEYS; i++) {
+		if (!keypad->gpio_wakeup[i])
+			break;
+		ret = remove_mfp_edge_wakeup(keypad->gpio_wakeup[i]);
+		if (ret) {
+			dev_err(&pdev->dev, "failed to remove edge wakeup\n");
+			return -EINVAL;
+		}
+	}
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	release_mem_region(res->start, resource_size(res));
+	if (res)
+		release_mem_region(res->start, resource_size(res));
 
 	kfree(keypad);
 

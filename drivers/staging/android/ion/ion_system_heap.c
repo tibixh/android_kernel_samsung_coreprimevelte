@@ -14,7 +14,6 @@
  *
  */
 
-#include <asm/page.h>
 #include <linux/dma-mapping.h>
 #include <linux/err.h>
 #include <linux/highmem.h>
@@ -90,7 +89,7 @@ static void free_buffer_page(struct ion_system_heap *heap,
 {
 	bool cached = ion_buffer_cached(buffer);
 
-	if (!cached) {
+	if (!cached && !(buffer->private_flags & ION_PRIV_FLAG_SHRINKER_FREE)) {
 		struct ion_page_pool *pool = heap->pools[order_to_index(order)];
 		ion_page_pool_free(pool, page);
 	} else {
@@ -202,15 +201,9 @@ static void ion_system_heap_free(struct ion_buffer *buffer)
 							struct ion_system_heap,
 							heap);
 	struct sg_table *table = buffer->sg_table;
-	bool cached = ion_buffer_cached(buffer);
 	struct scatterlist *sg;
 	LIST_HEAD(pages);
 	int i;
-
-	/* uncached pages come from the page pools, zero them before returning
-	   for security purposes (other allocations are zerod at alloc time */
-	if (!cached)
-		ion_heap_buffer_zero(buffer);
 
 	for_each_sg(table->sgl, sg, table->nents, i)
 		free_buffer_page(sys_heap, buffer, sg_page(sg),

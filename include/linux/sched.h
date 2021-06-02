@@ -173,7 +173,17 @@ extern unsigned long nr_running(void);
 extern unsigned long nr_iowait(void);
 extern unsigned long nr_iowait_cpu(int cpu);
 extern unsigned long this_cpu_load(void);
+extern unsigned long get_cpu_nr_running(unsigned int cpu);
 
+#ifdef CONFIG_RUNTIME_COMPCACHE
+unsigned long this_cpu_loadx(int i);
+#endif /* CONFIG_RUNTIME_COMPCACHE */
+#ifdef CONFIG_HMP_BOOST
+extern unsigned long nr_running_cpu(unsigned int cpu);
+extern int register_hmp_task_migration_notifier(struct notifier_block *nb);
+#define HMP_UP_MIGRATION       0
+#define HMP_DOWN_MIGRATION     1
+#endif
 
 extern void calc_global_load(unsigned long ticks);
 extern void update_cpu_load_nohz(void);
@@ -340,6 +350,11 @@ extern int proc_dowatchdog_thresh(struct ctl_table *table, int write,
 				  size_t *lenp, loff_t *ppos);
 extern unsigned int  softlockup_panic;
 void lockup_detector_init(void);
+#ifdef CONFIG_HARDLOCKUP_DETECTOR_OTHER_CPU
+extern unsigned int  hardlockup_enable;
+extern int proc_hardlockup(struct ctl_table *, int ,
+				void __user *, size_t *, loff_t *);
+#endif
 #else
 static inline void touch_softlockup_watchdog(void)
 {
@@ -755,6 +770,8 @@ struct user_struct {
 	unsigned long mq_bytes;	/* How many bytes can be allocated to mqueue? */
 #endif
 	unsigned long locked_shm; /* How many pages of mlocked shm ? */
+	unsigned long unix_inflight;	/* How many files in flight in unix sockets */
+	atomic_long_t pipe_bufs;  /* how many pages are allocated in pipe buffers */
 
 #ifdef CONFIG_KEYS
 	struct key *uid_keyring;	/* UID specific keyring */
@@ -978,6 +995,26 @@ void free_sched_domains(cpumask_var_t doms[], unsigned int ndoms);
 
 bool cpus_share_cache(int this_cpu, int that_cpu);
 
+#ifdef CONFIG_SCHED_HMP
+struct hmp_domain {
+	struct cpumask cpus;
+	struct cpumask possible_cpus;
+	struct list_head hmp_domains;
+};
+
+extern int set_hmp_boost(int enable);
+#ifdef CONFIG_HMP_BOOST
+extern int set_hmp_semiboost(int enable);
+extern int set_hmp_boostpulse(int duration);
+extern int get_hmp_boost(void);
+extern int get_hmp_semiboost(void);
+extern int set_hmp_up_threshold(int value);
+extern int set_hmp_down_threshold(int value);
+extern int set_active_down_migration(int enable);
+extern int set_hmp_aggressive_up_migration(int enable);
+extern int set_hmp_aggressive_yield(int enable);
+#endif /* CONFIG_HMP_BOOST */
+#endif /* CONFIG_SCHED_HMP */
 #else /* CONFIG_SMP */
 
 struct sched_domain_attr;
@@ -1025,7 +1062,22 @@ struct sched_avg {
 	u64 last_runnable_update;
 	s64 decay_count;
 	unsigned long load_avg_contrib;
+	unsigned long load_avg_ratio;
+#ifdef CONFIG_SCHED_HMP
+	u64 hmp_last_up_migration;
+	u64 hmp_last_down_migration;
+#endif
+	u32 usage_avg_sum;
 };
+
+#ifdef CONFIG_SCHED_HMP
+/*
+ * We want to avoid boosting any processes forked from init (PID 1)
+ * and kthreadd (assumed to be PID 2).
+ */
+extern int hmp_enabled;
+#define hmp_task_should_forkboost(task) ((task->parent && task->parent->pid > 2))
+#endif
 
 #ifdef CONFIG_SCHEDSTATS
 struct sched_statistics {
@@ -1600,7 +1652,6 @@ struct task_struct {
 
 #ifdef CONFIG_NUMA_BALANCING
 extern void task_numa_fault(int last_node, int node, int pages, int flags);
-extern pid_t task_numa_group_id(struct task_struct *p);
 extern void set_numabalancing_state(bool enabled);
 extern void task_numa_free(struct task_struct *p);
 
@@ -1609,10 +1660,6 @@ extern unsigned int sysctl_numa_balancing_migrate_deferred;
 static inline void task_numa_fault(int last_node, int node, int pages,
 				   int flags)
 {
-}
-static inline pid_t task_numa_group_id(struct task_struct *p)
-{
-	return 0;
 }
 static inline void set_numabalancing_state(bool enabled)
 {
@@ -1816,6 +1863,9 @@ static inline cputime_t task_gtime(struct task_struct *t)
 #endif
 extern void task_cputime_adjusted(struct task_struct *p, cputime_t *ut, cputime_t *st);
 extern void thread_group_cputime_adjusted(struct task_struct *p, cputime_t *ut, cputime_t *st);
+
+extern int task_free_register(struct notifier_block *n);
+extern int task_free_unregister(struct notifier_block *n);
 
 /*
  * Per process flags

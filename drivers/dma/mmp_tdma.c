@@ -19,9 +19,9 @@
 #include <linux/dmaengine.h>
 #include <linux/platform_device.h>
 #include <linux/device.h>
-#include <mach/regs-icu.h>
 #include <linux/platform_data/dma-mmp_tdma.h>
 #include <linux/of_device.h>
+#include <linux/of_dma.h>
 
 #include "dmaengine.h"
 
@@ -37,6 +37,9 @@
 #define TDCDPR		0x70	/* Current Desc */
 #define TDIMR		0x80	/* Int Mask */
 #define TDISR		0xa0	/* Int Status */
+
+/* DMA channel active */
+#define CHANACT		(1 << 14)
 
 /* Two-Channel DMA Control Register */
 #define TDCR_SSZ_8_BITS		(0x0 << 22)	/* Sample Size */
@@ -100,6 +103,15 @@ enum mmp_tdma_type {
 	PXA910_SQU,
 };
 
+/*
+ * define mmp-tdma status
+ */
+enum {
+	TDMA_COMPLETE = 0,
+	TDMA_IN_PROGRESS,
+	TDMA_PAUSED,
+};
+
 #define TDMA_ALIGNMENT		3
 #define TDMA_MAX_XFER_BYTES    SZ_64K
 
@@ -110,13 +122,14 @@ struct mmp_tdma_chan {
 	struct tasklet_struct		tasklet;
 
 	struct mmp_tdma_desc		*desc_arr;
-	phys_addr_t			desc_arr_phys;
+	dma_addr_t			desc_arr_phys;
 	int				desc_num;
 	enum dma_transfer_direction	dir;
 	dma_addr_t			dev_addr;
 	u32				burst_sz;
 	enum dma_slave_buswidth		buswidth;
 	enum dma_status			status;
+	u32 dma_state;
 
 	int				idx;
 	enum mmp_tdma_type		type;
@@ -147,10 +160,16 @@ static void mmp_tdma_chan_set_desc(struct mmp_tdma_chan *tdmac, dma_addr_t phys)
 					tdmac->reg_base + TDCR);
 }
 
+static void mmp_tdma_enable_irq(struct mmp_tdma_chan *tdmac, bool enable)
+{
+	if (enable)
+		writel(TDIMR_COMP, tdmac->reg_base + TDIMR);
+	else
+		writel(0, tdmac->reg_base + TDIMR);
+}
+
 static void mmp_tdma_enable_chan(struct mmp_tdma_chan *tdmac)
 {
-	/* enable irq */
-	writel(TDIMR_COMP, tdmac->reg_base + TDIMR);
 	/* enable dma chan */
 	writel(readl(tdmac->reg_base + TDCR) | TDCR_CHANEN,
 					tdmac->reg_base + TDCR);
@@ -159,12 +178,14 @@ static void mmp_tdma_enable_chan(struct mmp_tdma_chan *tdmac)
 
 static void mmp_tdma_disable_chan(struct mmp_tdma_chan *tdmac)
 {
-	writel(readl(tdmac->reg_base + TDCR) & ~TDCR_CHANEN,
-					tdmac->reg_base + TDCR);
+	u32 tdcr;
 
-	/* disable irq */
-	writel(0, tdmac->reg_base + TDIMR);
+	tdcr = readl(tdmac->reg_base + TDCR);
+	tdcr |= TDCR_ABR;
+	tdcr &= ~TDCR_CHANEN;
+	writel(tdcr, tdmac->reg_base + TDCR);
 
+	tdmac->dma_state = TDMA_COMPLETE;
 	tdmac->status = DMA_COMPLETE;
 }
 
@@ -172,6 +193,7 @@ static void mmp_tdma_resume_chan(struct mmp_tdma_chan *tdmac)
 {
 	writel(readl(tdmac->reg_base + TDCR) | TDCR_CHANEN,
 					tdmac->reg_base + TDCR);
+	tdmac->dma_state = TDMA_IN_PROGRESS;
 	tdmac->status = DMA_IN_PROGRESS;
 }
 
@@ -179,6 +201,7 @@ static void mmp_tdma_pause_chan(struct mmp_tdma_chan *tdmac)
 {
 	writel(readl(tdmac->reg_base + TDCR) & ~TDCR_CHANEN,
 					tdmac->reg_base + TDCR);
+	tdmac->dma_state = TDMA_PAUSED;
 	tdmac->status = DMA_PAUSED;
 }
 
@@ -275,9 +298,48 @@ static int mmp_tdma_clear_chan_irq(struct mmp_tdma_chan *tdmac)
 		reg &= ~TDISR_COMP;
 		writel(reg, tdmac->reg_base + TDISR);
 
+		tdmac->dma_state = TDMA_IN_PROGRESS;
 		return 0;
 	}
 	return -EAGAIN;
+}
+
+static void dma_do_tasklet(unsigned long data)
+{
+	struct mmp_tdma_chan *tdmac = (struct mmp_tdma_chan *)data;
+
+	if (tdmac->desc.callback)
+		tdmac->desc.callback(tdmac->desc.callback_param);
+
+}
+
+static size_t mmp_tdma_check_active(struct mmp_tdma_chan *tdmac)
+{
+	size_t value;
+
+	value = __raw_readl(tdmac->reg_base + TDCR);
+
+	return (value & CHANACT);
+}
+
+static size_t mmp_tdma_get_pos(struct mmp_tdma_chan *tdmac)
+{
+	size_t reg;
+
+	if (tdmac->dma_state == TDMA_COMPLETE)
+		if (!mmp_tdma_check_active(tdmac))
+			return 0;
+
+	if (tdmac->idx == 0) {
+		reg = __raw_readl(tdmac->reg_base + TDSAR);
+		reg -= tdmac->desc_arr[0].src_addr;
+	} else if (tdmac->idx == 1) {
+		reg = __raw_readl(tdmac->reg_base + TDDAR);
+		reg -= tdmac->desc_arr[0].dst_addr;
+	} else
+		return -EINVAL;
+
+	return reg;
 }
 
 static irqreturn_t mmp_tdma_chan_handler(int irq, void *dev_id)
@@ -285,7 +347,6 @@ static irqreturn_t mmp_tdma_chan_handler(int irq, void *dev_id)
 	struct mmp_tdma_chan *tdmac = dev_id;
 
 	if (mmp_tdma_clear_chan_irq(tdmac) == 0) {
-		tdmac->pos = (tdmac->pos + tdmac->period_len) % tdmac->buf_len;
 		tasklet_schedule(&tdmac->tasklet);
 		return IRQ_HANDLED;
 	} else
@@ -312,22 +373,13 @@ static irqreturn_t mmp_tdma_int_handler(int irq, void *dev_id)
 		return IRQ_NONE;
 }
 
-static void dma_do_tasklet(unsigned long data)
-{
-	struct mmp_tdma_chan *tdmac = (struct mmp_tdma_chan *)data;
-
-	if (tdmac->desc.callback)
-		tdmac->desc.callback(tdmac->desc.callback_param);
-
-}
-
 static void mmp_tdma_free_descriptor(struct mmp_tdma_chan *tdmac)
 {
 	struct gen_pool *gpool;
 	int size = tdmac->desc_num * sizeof(struct mmp_tdma_desc);
 
 	gpool = tdmac->pool;
-	if (tdmac->desc_arr)
+	if (gpool && tdmac->desc_arr)
 		gen_pool_free(gpool, (unsigned long)tdmac->desc_arr,
 				size);
 	tdmac->desc_arr = NULL;
@@ -400,7 +452,7 @@ static struct dma_async_tx_descriptor *mmp_tdma_prep_dma_cyclic(
 
 	if (period_len > TDMA_MAX_XFER_BYTES) {
 		dev_err(tdmac->dev,
-				"maximum period size exceeded: %d > %d\n",
+				"maximum period size exceeded: %zu > %d\n",
 				period_len, TDMA_MAX_XFER_BYTES);
 		goto err_out;
 	}
@@ -433,6 +485,10 @@ static struct dma_async_tx_descriptor *mmp_tdma_prep_dma_cyclic(
 		i++;
 	}
 
+	/* enable interrupt */
+	if (flags & DMA_PREP_INTERRUPT)
+		mmp_tdma_enable_irq(tdmac, true);
+
 	tdmac->buf_len = buf_len;
 	tdmac->period_len = period_len;
 	tdmac->pos = 0;
@@ -454,6 +510,15 @@ static int mmp_tdma_control(struct dma_chan *chan, enum dma_ctrl_cmd cmd,
 	switch (cmd) {
 	case DMA_TERMINATE_ALL:
 		mmp_tdma_disable_chan(tdmac);
+
+		/* disable interrupt */
+		mmp_tdma_enable_irq(tdmac, false);
+		/*
+		 * need to free descriptor as audio HAL doesn't close the
+		 * stream when audio stream ends
+		 */
+		if (tdmac->desc_arr)
+			mmp_tdma_free_descriptor(tdmac);
 		break;
 	case DMA_PAUSE:
 		mmp_tdma_pause_chan(tdmac);
@@ -485,6 +550,14 @@ static enum dma_status mmp_tdma_tx_status(struct dma_chan *chan,
 {
 	struct mmp_tdma_chan *tdmac = to_mmp_tdma_chan(chan);
 
+	tdmac->pos = mmp_tdma_get_pos(tdmac);
+	/*
+	 * Fixme: it needs 8bytes alignment on arm64
+	 * Or copy_from/to_user will panic
+	 */
+#ifdef CONFIG_ARM64
+	tdmac->pos &= ~0x7;
+#endif
 	dma_set_tx_state(txstate, chan->completed_cookie, chan->cookie,
 			 tdmac->buf_len - tdmac->pos);
 
@@ -529,9 +602,10 @@ static int mmp_tdma_chan_init(struct mmp_tdma_device *tdev,
 	tdmac->chan.device = &tdev->device;
 	tdmac->idx	   = idx;
 	tdmac->type	   = type;
-	tdmac->reg_base	   = tdev->base + idx * 4;
+	tdmac->reg_base	   = (void __iomem *)tdev->base + idx * 4;
 	tdmac->pool	   = pool;
 	tdmac->status = DMA_COMPLETE;
+	tdmac->dma_state = TDMA_COMPLETE;
 	tdev->tdmac[tdmac->idx] = tdmac;
 	tasklet_init(&tdmac->tasklet, dma_do_tasklet, (unsigned long)tdmac);
 
@@ -539,6 +613,45 @@ static int mmp_tdma_chan_init(struct mmp_tdma_device *tdev,
 	list_add_tail(&tdmac->chan.device_node,
 			&tdev->device.channels);
 	return 0;
+}
+
+struct mmp_tdma_filter_param {
+	struct device_node *of_node;
+	unsigned int chan_id;
+};
+
+static bool mmp_tdma_filter_fn(struct dma_chan *chan, void *fn_param)
+{
+	struct mmp_tdma_filter_param *param = fn_param;
+	struct mmp_tdma_chan *tdmac = to_mmp_tdma_chan(chan);
+	struct dma_device *pdma_device = tdmac->chan.device;
+
+	if (pdma_device->dev->of_node != param->of_node)
+		return false;
+
+	if (chan->chan_id != param->chan_id)
+		return false;
+
+	return true;
+}
+
+struct dma_chan *mmp_tdma_xlate(struct of_phandle_args *dma_spec,
+			       struct of_dma *ofdma)
+{
+	struct mmp_tdma_device *tdev = ofdma->of_dma_data;
+	dma_cap_mask_t mask = tdev->device.cap_mask;
+	struct mmp_tdma_filter_param param;
+
+	if (dma_spec->args_count != 1)
+		return NULL;
+
+	param.of_node = ofdma->of_node;
+	param.chan_id = dma_spec->args[0];
+
+	if (param.chan_id >= TDMA_CHANNEL_NUM)
+		return NULL;
+
+	return dma_request_channel(mask, mmp_tdma_filter_fn, &param);
 }
 
 static struct of_device_id mmp_tdma_dt_ids[] = {
@@ -557,7 +670,8 @@ static int mmp_tdma_probe(struct platform_device *pdev)
 	int i, ret;
 	int irq = 0, irq_num = 0;
 	int chan_num = TDMA_CHANNEL_NUM;
-	struct gen_pool *pool;
+	struct gen_pool *pool = NULL;
+	struct device_node *np = pdev->dev.of_node;
 
 	of_id = of_match_device(mmp_tdma_dt_ids, &pdev->dev);
 	if (of_id)
@@ -584,13 +698,15 @@ static int mmp_tdma_probe(struct platform_device *pdev)
 
 	INIT_LIST_HEAD(&tdev->device.channels);
 
-	if (pdev->dev.of_node)
-		pool = of_get_named_gen_pool(pdev->dev.of_node, "asram", 0);
-	else
-		pool = sram_get_gpool("asram");
-	if (!pool) {
-		dev_err(&pdev->dev, "asram pool not available\n");
-		return -ENOMEM;
+	if (np) {
+		pool = of_get_named_gen_pool(np, "asram", 0);
+		if (!pool) {
+			dev_err(&pdev->dev, "asram pool not available\n");
+			return -ENOMEM;
+		}
+	} else {
+		dev_err(&pdev->dev, "asram exit due to no dt\n");
+		return -EINVAL;
 	}
 
 	if (irq_num != chan_num) {
@@ -629,6 +745,13 @@ static int mmp_tdma_probe(struct platform_device *pdev)
 	if (ret) {
 		dev_err(tdev->device.dev, "unable to register\n");
 		return ret;
+	}
+
+	ret = of_dma_controller_register(np, mmp_tdma_xlate, tdev);
+	if (ret) {
+		dev_err(tdev->device.dev,
+			"failed to register controller\n");
+		dma_async_device_unregister(&tdev->device);
 	}
 
 	dev_info(tdev->device.dev, "initialized\n");

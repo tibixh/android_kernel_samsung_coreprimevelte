@@ -174,7 +174,8 @@ not_angel:
 		@ determine final kernel image address
 		mov	r4, pc
 		and	r4, r4, #0xf8000000
-		add	r4, r4, #TEXT_OFFSET
+		ldr	r3, =TEXT_OFFSET
+		add	r4, r4, r3
 #else
 		ldr	r4, =zreladdr
 #endif
@@ -708,6 +709,12 @@ __armv4_mmu_cache_on:
 
 __armv7_mmu_cache_on:
 		mov	r12, lr
+#ifdef CONFIG_CPU_CA7MP
+		@ CA7 Core - Set ACTLR.SMP bit before enabling MMU/Caches
+		mrc	p15, 0, r0, c1, c0, 1	@ Read CP15 ACTLR
+		orr	r0, r0, #1 << 6		@ Set ACTLR.SMP bit
+		mcr	p15, 0, r0, c1, c0, 1	@ Write CP15 ACTLR
+#endif
 #ifdef CONFIG_MMU
 		mrc	p15, 0, r11, c0, c1, 4	@ read ID_MMFR0
 		tst	r11, #0xf		@ VMSA
@@ -733,6 +740,8 @@ __armv7_mmu_cache_on:
 		bic     r6, r6, #1 << 31        @ 32-bit translation system
 		bic     r6, r6, #3 << 0         @ use only ttbr0
 		mcrne	p15, 0, r3, c2, c0, 0	@ load page table pointer
+		mcrne	p15, 0, r0, c8, c7, 0	@ flush I,D TLBs
+		mcr	p15, 0, r0, c7, c5, 4	@ ISB
 		mcrne	p15, 0, r1, c3, c0, 0	@ load domain access control
 		mcrne   p15, 0, r6, c2, c0, 2   @ load ttb control
 #endif
@@ -1103,6 +1112,9 @@ hierarchical:
 		beq	finished		@ if loc is 0, then no need to clean
 		mov	r10, #0			@ start clean at cache level 0
 loop1:
+#ifdef CONFIG_ARM_ERRATA_814220
+		mcr	p15, 0, r10, c7, c10, 4	@ DSB
+#endif
 		add	r2, r10, r10, lsr #1	@ work out 3x current cache level
 		mov	r1, r0, lsr r2		@ extract cache type bits from clidr
 		and	r1, r1, #7		@ mask of the bits for current cache only

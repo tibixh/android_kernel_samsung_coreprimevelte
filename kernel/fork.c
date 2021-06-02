@@ -145,7 +145,7 @@ void __weak arch_release_thread_info(struct thread_info *ti)
  * Allocate pages if THREAD_SIZE is >= PAGE_SIZE, otherwise use a
  * kmemcache based allocator.
  */
-# if THREAD_SIZE >= PAGE_SIZE
+# if THREAD_SIZE >= PAGE_SIZE && !CONFIG_ARM64_THREADINFO_SLABCACHE
 static struct thread_info *alloc_thread_info_node(struct task_struct *tsk,
 						  int node)
 {
@@ -160,17 +160,33 @@ static inline void free_thread_info(struct thread_info *ti)
 	free_memcg_kmem_pages((unsigned long)ti, THREAD_SIZE_ORDER);
 }
 # else
+
 static struct kmem_cache *thread_info_cache;
+#ifdef CONFIG_THREADINFO_MEMPOOL
+static mempool_t *thread_info_pool;
+#endif
 
 static struct thread_info *alloc_thread_info_node(struct task_struct *tsk,
 						  int node)
 {
+#ifdef CONFIG_THREADINFO_MEMPOOL
+	return mempool_alloc(thread_info_pool, THREADINFO_GFP_ACCOUNTED);
+#else
+#ifdef CONFIG_ARM64_THREADINFO_SLABCACHE
+	return kmem_cache_alloc_node(thread_info_cache, THREADINFO_GFP_ACCOUNTED, node);
+#else
 	return kmem_cache_alloc_node(thread_info_cache, THREADINFO_GFP, node);
+#endif
+#endif
 }
 
 static void free_thread_info(struct thread_info *ti)
 {
+#ifdef CONFIG_THREADINFO_MEMPOOL
+	mempool_free(ti, thread_info_pool);
+#else
 	kmem_cache_free(thread_info_cache, ti);
+#endif
 }
 
 void thread_info_cache_init(void)
@@ -178,6 +194,27 @@ void thread_info_cache_init(void)
 	thread_info_cache = kmem_cache_create("thread_info", THREAD_SIZE,
 					      THREAD_SIZE, 0, NULL);
 	BUG_ON(thread_info_cache == NULL);
+#ifdef CONFIG_THREADINFO_MEMPOOL
+	unsigned int min_nr, ratio;
+
+	if (totalram_pages >= 1536 * 256 && totalram_pages < 2048 * 256)
+		ratio = 50;	// 2.0GiB RAM Device
+	else if (totalram_pages >= 1024 * 256 && totalram_pages < 1536 * 256)
+		ratio = 60;	// 1.5GiB RAM Device
+	else if (totalram_pages >= 768 * 256 && totalram_pages < 1024 * 256)
+		ratio = 75;	// 1.0GiB RAM Device
+	else if (totalram_pages >= 512 * 256 && totalram_pages < 768 * 256)
+		ratio = 80;	// 768MiB RAM Device
+	else
+		ratio = 90;	// 512MiB RAM Device
+
+	min_nr = (totalram_pages * ratio / 10000) / (THREAD_SIZE / PAGE_SIZE);
+	pr_info("thread_info mempool reserved : %d \n", min_nr);
+
+	thread_info_pool = mempool_create(min_nr, mempool_alloc_slab,
+			mempool_free_slab, thread_info_cache);
+	BUG_ON(thread_info_pool == NULL);
+#endif
 }
 # endif
 #endif
@@ -199,6 +236,9 @@ struct kmem_cache *vm_area_cachep;
 
 /* SLAB cache for mm_struct structures (tsk->mm) */
 static struct kmem_cache *mm_cachep;
+
+/* Notifier list called when a task struct is freed */
+static ATOMIC_NOTIFIER_HEAD(task_free_notifier);
 
 static void account_kernel_stack(struct thread_info *ti, int account)
 {
@@ -233,6 +273,18 @@ static inline void put_signal_struct(struct signal_struct *sig)
 		free_signal_struct(sig);
 }
 
+int task_free_register(struct notifier_block *n)
+{
+	return atomic_notifier_chain_register(&task_free_notifier, n);
+}
+EXPORT_SYMBOL(task_free_register);
+
+int task_free_unregister(struct notifier_block *n)
+{
+	return atomic_notifier_chain_unregister(&task_free_notifier, n);
+}
+EXPORT_SYMBOL(task_free_unregister);
+
 void __put_task_struct(struct task_struct *tsk)
 {
 	WARN_ON(!tsk->exit_state);
@@ -244,6 +296,7 @@ void __put_task_struct(struct task_struct *tsk)
 	delayacct_tsk_free(tsk);
 	put_signal_struct(tsk->signal);
 
+	atomic_notifier_call_chain(&task_free_notifier, 0, tsk);
 	if (!profile_handoff_task(tsk))
 		free_task(tsk);
 }
@@ -692,7 +745,8 @@ struct mm_struct *mm_access(struct task_struct *task, unsigned int mode)
 
 	mm = get_task_mm(task);
 	if (mm && mm != current->mm &&
-			!ptrace_may_access(task, mode)) {
+			!ptrace_may_access(task, mode) &&
+			!capable(CAP_SYS_RESOURCE)) {
 		mmput(mm);
 		mm = ERR_PTR(-EACCES);
 	}

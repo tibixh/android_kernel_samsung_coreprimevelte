@@ -592,7 +592,7 @@ int snd_info_card_create(struct snd_card *card)
 	char str[8];
 	struct snd_info_entry *entry;
 
-	if (snd_BUG_ON(!card))
+	if (snd_BUG_ON(!card || card->number >= SNDRV_CARDS))
 		return -ENXIO;
 
 	sprintf(str, "card%i", card->number);

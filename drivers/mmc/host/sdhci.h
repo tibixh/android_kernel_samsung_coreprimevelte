@@ -138,6 +138,7 @@
 #define  SDHCI_INT_BUS_POWER	0x00800000
 #define  SDHCI_INT_ACMD12ERR	0x01000000
 #define  SDHCI_INT_ADMA_ERROR	0x02000000
+#define  SDHCI_INT_CRC_STATUS	0x80000000
 
 #define  SDHCI_INT_NORMAL_MASK	0x00007FFF
 #define  SDHCI_INT_ERROR_MASK	0xFFFF8000
@@ -148,7 +149,7 @@
 		SDHCI_INT_DATA_AVAIL | SDHCI_INT_SPACE_AVAIL | \
 		SDHCI_INT_DATA_TIMEOUT | SDHCI_INT_DATA_CRC | \
 		SDHCI_INT_DATA_END_BIT | SDHCI_INT_ADMA_ERROR | \
-		SDHCI_INT_BLK_GAP)
+		SDHCI_INT_BLK_GAP | SDHCI_INT_CRC_STATUS)
 #define SDHCI_INT_ALL_MASK	((unsigned int)-1)
 
 #define SDHCI_ACMD12_ERR	0x3C
@@ -169,6 +170,7 @@
 #define   SDHCI_CTRL_DRV_TYPE_D		0x0030
 #define  SDHCI_CTRL_EXEC_TUNING		0x0040
 #define  SDHCI_CTRL_TUNED_CLK		0x0080
+#define  SDHCI_CTRL_ASYNC_INT		0x4000
 #define  SDHCI_CTRL_PRESET_VAL_ENABLE	0x8000
 
 #define SDHCI_CAPABILITIES	0x40
@@ -295,7 +297,15 @@ struct sdhci_ops {
 	void	(*platform_resume)(struct sdhci_host *host);
 	void    (*adma_workaround)(struct sdhci_host *host, u32 intmask);
 	void	(*platform_init)(struct sdhci_host *host);
+	void	(*access_constrain)(struct sdhci_host *host, unsigned int ac);
 	void    (*card_event)(struct sdhci_host *host);
+	unsigned long (*clk_prepare)(struct sdhci_host *host, unsigned long rate);
+	void	(*clr_wakeup_event)(struct sdhci_host *host);
+	void	(*signal_vol_change)(struct sdhci_host *host, u8 vol);
+	void	(*clk_gate_auto)(struct sdhci_host *host, unsigned int ctrl);
+	void	(*host_caps_disable)(struct sdhci_host *host);
+	void	(*platform_hw_tuning_prepare)(struct sdhci_host *host);
+	void	(*int_clk_force_on)(struct sdhci_host *host, unsigned int force_on);
 };
 
 #ifdef CONFIG_MMC_SDHCI_IO_ACCESSORS
@@ -396,6 +406,9 @@ extern int sdhci_add_host(struct sdhci_host *host);
 extern void sdhci_remove_host(struct sdhci_host *host, int dead);
 extern void sdhci_send_command(struct sdhci_host *host,
 				struct mmc_command *cmd);
+extern void sdhci_access_constrain(struct sdhci_host *host, unsigned int ac);
+extern void sdhci_clear_set_irqs(struct sdhci_host *host, u32 clear, u32 set);
+extern void sdhci_reset(struct sdhci_host *host, u8 mask);
 
 #ifdef CONFIG_PM
 extern int sdhci_suspend_host(struct sdhci_host *host);
@@ -404,8 +417,19 @@ extern void sdhci_enable_irq_wakeups(struct sdhci_host *host);
 #endif
 
 #ifdef CONFIG_PM_RUNTIME
+extern int sdhci_runtime_pm_get(struct sdhci_host *host);
+extern int sdhci_runtime_pm_put(struct sdhci_host *host);
 extern int sdhci_runtime_suspend_host(struct sdhci_host *host);
 extern int sdhci_runtime_resume_host(struct sdhci_host *host);
+#else
+static inline int sdhci_runtime_pm_get(struct sdhci_host *host)
+{
+	return 0;
+}
+static inline int sdhci_runtime_pm_put(struct sdhci_host *host)
+{
+	return 0;
+}
 #endif
 
 #endif /* __SDHCI_HW_H */

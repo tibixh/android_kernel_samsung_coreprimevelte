@@ -15,6 +15,14 @@ config USB_OTG_FSM
 	  Implements OTG Final State Machine as specified in On-The-Go
 	  and Embedded Host Supplement to the USB Revision 2.0 Specification.
 
+config USB_OTG_WAKELOCK
+	bool "Hold a wakelock when USB connected"
+	depends on WAKELOCK
+	select USB_OTG_UTILS
+	help
+	  Select this to automatically hold a wakelock when USB is
+	  connected, preventing suspend.
+
 #
 # USB Transceiver Drivers
 #
@@ -213,6 +221,15 @@ config USB_MV_OTG
 	  Say Y here if you want to build Marvell USB OTG transciever
 	  driver in kernel (including PXA and MMP series). This driver
 	  implements role switch between EHCI host driver and gadget driver.
+
+	  To compile this driver as a module, choose M here.
+
+config MV_USB2_PHY
+	tristate "Marvell USB 2.0 PHY Driver"
+	help
+	  Enable this to support Marvell USB 2.0 PHY driver for Marvell
+	  SoC. This driver will do the PHY initialization and shutdown.
+	  The PHY driver will be used by Marvell udc/ehci/otg driver.
 
 	  To compile this driver as a module, choose M here.
 

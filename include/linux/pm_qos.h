@@ -15,7 +15,29 @@ enum {
 	PM_QOS_CPU_DMA_LATENCY,
 	PM_QOS_NETWORK_LATENCY,
 	PM_QOS_NETWORK_THROUGHPUT,
-
+	PM_QOS_CPUIDLE_BLOCK,
+	PM_QOS_CPUFREQ_MIN,
+	PM_QOS_CPUFREQ_MAX,
+	PM_QOS_CPU_NUM_MIN,
+	PM_QOS_CPU_NUM_MAX,
+	PM_QOS_DDR_DEVFREQ_MIN,
+	PM_QOS_DDR_DEVFREQ_MAX,
+	PM_QOS_AXI_MIN,
+	PM_QOS_VPU_DEVFREQ_MIN,
+	PM_QOS_VPU_DEVFREQ_MAX,
+	PM_QOS_GPUFREQ_3D_MIN,
+	PM_QOS_GPUFREQ_2D_MIN,
+	PM_QOS_GPUFREQ_SH_MIN,
+	PM_QOS_GPUFREQ_3D_MAX,
+	PM_QOS_GPUFREQ_2D_MAX,
+	PM_QOS_GPUFREQ_SH_MAX,
+	/* define below QoS for on platform with bL arch */
+	PM_QOS_CPUFREQ_L_MIN,
+	PM_QOS_CPUFREQ_L_MAX,
+	PM_QOS_CPUFREQ_B_MIN,
+	PM_QOS_CPUFREQ_B_MAX,
+	PM_QOS_CCI_MIN,
+	PM_QOS_CLST_VL_MIN,
 	/* insert new class ID */
 	PM_QOS_NUM_CLASSES,
 };
@@ -33,6 +55,8 @@ enum pm_qos_flags_status {
 #define PM_QOS_NETWORK_LAT_DEFAULT_VALUE	(2000 * USEC_PER_SEC)
 #define PM_QOS_NETWORK_THROUGHPUT_DEFAULT_VALUE	0
 #define PM_QOS_DEV_LAT_DEFAULT_VALUE		0
+/* Assume maxium hardware lowpower state is 15 */
+#define PM_QOS_CPUIDLE_BLOCK_DEFAULT_VALUE	15
 
 #define PM_QOS_FLAG_NO_POWER_OFF	(1 << 0)
 #define PM_QOS_FLAG_REMOTE_WAKEUP	(1 << 1)
@@ -40,6 +64,7 @@ enum pm_qos_flags_status {
 struct pm_qos_request {
 	struct plist_node node;
 	int pm_qos_class;
+	const char *name;
 	struct delayed_work work; /* for pm_qos_update_request_timeout */
 };
 
@@ -99,6 +124,21 @@ enum pm_qos_req_action {
 	PM_QOS_UPDATE_REQ,	/* Update an existing request */
 	PM_QOS_REMOVE_REQ	/* Remove an existing request */
 };
+
+/*
+ * locking rule: all changes to constraints or notifiers lists
+ * or pm_qos_object list and pm_qos_objects need to happen with pm_qos_lock
+ * held, taken with _irqsave.  One lock to rule them all
+ */
+struct pm_qos_object {
+	struct pm_qos_constraints *constraints;
+	struct miscdevice pm_qos_power_miscdev;
+	char *name;
+};
+
+/* Declare qos_array in case other drivers may access it */
+extern spinlock_t pm_qos_lock;
+extern struct pm_qos_object *pm_qos_array[];
 
 static inline int dev_pm_qos_request_active(struct dev_pm_qos_request *req)
 {

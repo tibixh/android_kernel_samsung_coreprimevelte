@@ -267,6 +267,37 @@ static void mmc_select_card_type(struct mmc_card *card)
 	card->ext_csd.card_type = card_type;
 }
 
+/* eMMC 5.0 or later only */
+/*
+  * mmc_merge_ext_csd - merge some ext_csd field to a variable.
+  * @ext_csd : pointer of ext_csd.(1 Byte/field)
+  * @continuous : if you want to merge continuous field, set true.
+  * @count : a number of ext_csd field to merge(=< 8)
+  * @args : list of ext_csd index or first index.
+  */
+static unsigned long long mmc_merge_ext_csd(u8 *ext_csd, bool continuous, int count, ...)
+{
+	unsigned long long merge_ext_csd = 0;
+	va_list args;
+	int i = 0;
+	int index;
+
+	va_start(args, count);
+
+	index = va_arg(args, int);
+	for (i = 0; i < count; i++) {
+		if (continuous) {
+			merge_ext_csd = merge_ext_csd << 8 | ext_csd[index + count - 1 - i];
+		} else {
+			merge_ext_csd = merge_ext_csd << 8 | ext_csd[index];
+			index = va_arg(args, int);
+		}
+	}
+	va_end(args);
+
+	return merge_ext_csd;
+}
+
 /*
  * Decode extended CSD.
  */
@@ -294,11 +325,9 @@ static int mmc_read_ext_csd(struct mmc_card *card, u8 *ext_csd)
 	}
 
 	card->ext_csd.rev = ext_csd[EXT_CSD_REV];
-	if (card->ext_csd.rev > 7) {
+	if (card->ext_csd.rev > 7) {	/* 6 is for MMC v4.5 and 7 is reserved value */
 		pr_err("%s: unrecognised EXT_CSD revision %d\n",
 			mmc_hostname(card->host), card->ext_csd.rev);
-		err = -EINVAL;
-		goto out;
 	}
 
 	card->ext_csd.raw_sectors[0] = ext_csd[EXT_CSD_SEC_CNT + 0];
@@ -490,14 +519,38 @@ static int mmc_read_ext_csd(struct mmc_card *card, u8 *ext_csd)
 		/* check whether the eMMC card supports BKOPS */
 		if (ext_csd[EXT_CSD_BKOPS_SUPPORT] & 0x1) {
 			card->ext_csd.bkops = 1;
+			if ((card->host->caps2 & MMC_CAP2_BKOPS_EN) &&
+					!(ext_csd[EXT_CSD_BKOPS_EN] & 0x1)) {
+				err = mmc_switch(card, EXT_CSD_CMD_SET_NORMAL,
+						EXT_CSD_BKOPS_EN, 0x1, 0x0);
+				if (!err)
+					ext_csd[EXT_CSD_BKOPS_EN] |= 0x1;
+				else
+					err = 0;
+			}
 			card->ext_csd.bkops_en = ext_csd[EXT_CSD_BKOPS_EN];
 			card->ext_csd.raw_bkops_status =
 				ext_csd[EXT_CSD_BKOPS_STATUS];
-			if (!card->ext_csd.bkops_en)
+			if (!(card->ext_csd.bkops_en & 0x1))
 				pr_info("%s: BKOPS_EN bit is not set\n",
+					mmc_hostname(card->host));
+			else
+				pr_info("%s: BKOPS_EN bit is set\n",
 					mmc_hostname(card->host));
 		}
 
+		if ((ext_csd[EXT_CSD_VENDOR_SPECIFIC_FIELD + 0] & 0x1) &&
+				(card->cid.manfid == 0x15))
+			card->ext_csd.feature_support |= MMC_DISCARD_FEATURE;
+
+		/*
+		 * enable discard feature if emmc is 4.41+ Toshiba eMMC 19nm
+		 * Normally, emmc 4.5 use EXT_CSD[501]
+		 */
+		if ((ext_csd[EXT_CSD_MAX_PACKED_READS] & 0x3F) &&
+				(card->cid.manfid == 0x11))
+			card->ext_csd.feature_support |= MMC_DISCARD_FEATURE;
+	
 		/* check whether the eMMC card supports HPI */
 		if (ext_csd[EXT_CSD_HPI_FEATURES] & 0x1) {
 			card->ext_csd.hpi = 1;
@@ -569,6 +622,21 @@ static int mmc_read_ext_csd(struct mmc_card *card, u8 *ext_csd)
 			ext_csd[EXT_CSD_MAX_PACKED_READS];
 	} else {
 		card->ext_csd.data_sector_size = 512;
+	}
+
+	/* eMMC v5.0 or later */
+	if (card->ext_csd.rev >= 7) {
+		card->ext_csd.smart_info = mmc_merge_ext_csd(ext_csd, false, 8,
+				EXT_CSD_DEVICE_LIFE_TIME_EST_TYPE_B,
+				EXT_CSD_DEVICE_LIFE_TIME_EST_TYPE_A,
+				EXT_CSD_PRE_EOL_INFO,
+				EXT_CSD_OPTIMAL_TRIM_UNIT_SIZE,
+				EXT_CSD_DEVICE_VERSION + 1,
+				EXT_CSD_DEVICE_VERSION,
+				EXT_CSD_HC_ERASE_GRP_SIZE,
+				EXT_CSD_HC_WP_GRP_SIZE);
+		card->ext_csd.fwdate = mmc_merge_ext_csd(ext_csd, true, 8,
+				EXT_CSD_FIRMWARE_VERSION);
 	}
 
 out:
@@ -674,6 +742,19 @@ MMC_DEV_ATTR(enhanced_area_offset, "%llu\n",
 MMC_DEV_ATTR(enhanced_area_size, "%u\n", card->ext_csd.enhanced_area_size);
 MMC_DEV_ATTR(raw_rpmb_size_mult, "%#x\n", card->ext_csd.raw_rpmb_size_mult);
 MMC_DEV_ATTR(rel_sectors, "%#x\n", card->ext_csd.rel_sectors);
+MMC_DEV_ATTR(caps, "0x%08x\n", (unsigned int)(card->host->caps));
+MMC_DEV_ATTR(caps2, "0x%08x\n", card->host->caps2);
+MMC_DEV_ATTR(erase_type, "MMC_CAP_ERASE %s, type %s, SECURE %s, Sanitize %s\n",
+		card->host->caps & MMC_CAP_ERASE ? "enabled" : "disabled",
+		mmc_can_discard(card) ? "DISCARD" :
+		(mmc_can_trim(card) ? "TRIM" : "NORMAL"),
+		(!mmc_can_sanitize(card) && mmc_can_secure_erase_trim(card) &&
+		 mmc_can_trim(card) &&
+		 (card->host->caps2 & MMC_CAP2_SECURE_ERASE_EN) )?
+		"supportable" : "disabled",
+		mmc_can_sanitize(card) ? "enabled" : "disabled");
+MMC_DEV_ATTR(smart, "0x%016llx\n", card->ext_csd.smart_info);
+MMC_DEV_ATTR(fwdate, "0x%016llx\n", card->ext_csd.fwdate);
 
 static struct attribute *mmc_std_attrs[] = {
 	&dev_attr_cid.attr,
@@ -692,6 +773,11 @@ static struct attribute *mmc_std_attrs[] = {
 	&dev_attr_enhanced_area_size.attr,
 	&dev_attr_raw_rpmb_size_mult.attr,
 	&dev_attr_rel_sectors.attr,
+	&dev_attr_caps.attr,
+	&dev_attr_caps2.attr,
+	&dev_attr_erase_type.attr,
+	&dev_attr_smart.attr,
+	&dev_attr_fwdate.attr,
 	NULL,
 };
 
@@ -884,7 +970,7 @@ static int mmc_init_card(struct mmc_host *host, u32 ocr,
 	/* Set correct bus mode for MMC before attempting init */
 	if (!mmc_host_is_spi(host))
 		mmc_set_bus_mode(host, MMC_BUSMODE_OPENDRAIN);
-
+reinit:
 	/*
 	 * Since we're changing the OCR value, we seem to
 	 * need to tell some cards to go back to the idle
@@ -1146,6 +1232,8 @@ static int mmc_init_card(struct mmc_host *host, u32 ocr,
 		 */
 		if ((host->caps2 & MMC_CAP2_HS200) &&
 		    card->host->ops->execute_tuning) {
+			if (card->host->card == NULL)
+				card->host->card = card;
 			mmc_host_clk_hold(card->host);
 			err = card->host->ops->execute_tuning(card->host,
 				MMC_SEND_TUNING_BLOCK_HS200);
@@ -1154,7 +1242,8 @@ static int mmc_init_card(struct mmc_host *host, u32 ocr,
 		if (err) {
 			pr_warning("%s: tuning execution failed\n",
 				   mmc_hostname(card->host));
-			goto err;
+			host->caps2 &= ~MMC_CAP2_HS200;
+			goto reinit;
 		}
 
 		ext_csd_bits = (bus_width == MMC_BUS_WIDTH_8) ?
@@ -1329,6 +1418,17 @@ static int mmc_init_card(struct mmc_host *host, u32 ocr,
 			err = 0;
 		} else {
 			card->ext_csd.packed_event_en = 1;
+		}
+	}
+
+	/* if it is from resume. check bkops mode */
+	if (oldcard) {
+		if (oldcard->bkops_enable & 0xFE) {
+			/*
+			 * if bkops mode is enable before getting suspend.
+			 * turn on the bkops mode
+			 */
+			mmc_bkops_enable(oldcard->host, oldcard->bkops_enable);
 		}
 	}
 

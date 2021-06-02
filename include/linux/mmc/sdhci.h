@@ -16,6 +16,8 @@
 #include <linux/types.h>
 #include <linux/io.h>
 #include <linux/mmc/host.h>
+#include <linux/slab.h>
+#include <linux/wakelock.h>
 
 struct sdhci_host {
 	/* Data set by hardware interface driver */
@@ -100,7 +102,32 @@ struct sdhci_host {
 #define SDHCI_QUIRK2_BROKEN_HOST_CONTROL		(1<<5)
 /* Controller does not support HS200 */
 #define SDHCI_QUIRK2_BROKEN_HS200			(1<<6)
-
+/* Some SDHCI v3 controller doesn't suppport current limit error */
+#define SDHCI_QUIRK2_NO_CURRENT_LIMIT                   (1<<10)
+/* Controller data timeout counter is 4 times long as spec defined */
+#define SDHCI_QUIRK2_TIMEOUT_DIVIDE_4			(1<<11)
+/* Controller enable HW bus clock gating by default */
+#define SDHCI_QUIRK2_BUS_CLK_GATE_ENABLED		(1<<12)
+/* Controller must enable clock gate by software during CMDs */
+#define SDHCI_QUIRK2_SDIO_SW_CLK_GATE			(1<<13)
+/* some SD host need to set IO capability by SOC part register */
+#define SDHCI_QUIRK2_SET_AIB_MMC			(1<<14)
+/* After SD host request, prevent system to suspend state for a while */
+#define SDHCI_QUIRK2_HOLDSUSPEND_AFTER_REQUEST		(1<<15)
+/* HS200/SDR104 SW tuning can't use ADMA */
+#define SDHCI_QUIRK2_TUNING_ADMA_BROKEN			(1<<16)
+/* HS200/SDR104 SW tuning not supported */
+#define SDHCI_QUIRK2_TUNING_SW_BROKEN			(1<<17)
+/* Controller supported max data timeout is too short (~10s for 52Mhz bus clock) */
+#define SDHCI_QUIRK2_TIMEOUT_SHORT			(1<<18)
+/* Some PXA SDH, fake interrupt would happen during CMD53 in UHS mode */
+#define SDHCI_QUIRK2_FAKE_SDIO_IRQ_IN_UHS		(1<<19)
+/* HS200/SDR104 tuning broken and must use predefined fixed delay */
+#define SDHCI_QUIRK2_TUNING_BROKEN			(1<<20)
+/* Vqmmc needs always on to keep host power on for card detection */
+#define SDHCI_QUIRK2_VQMMC_ALWAYS_ON			(1<<21)
+/* DMA need internal clock force on */
+#define SDHCI_QUIRK2_DMA_CLOCK_FORCE_ON			(1<<23)
 	int irq;		/* Device IRQ */
 	void __iomem *ioaddr;	/* Mapped address */
 
@@ -156,14 +183,20 @@ struct sdhci_host {
 
 	int sg_count;		/* Mapped sg entries */
 
-	u8 *adma_desc;		/* ADMA descriptor table */
-	u8 *align_buffer;	/* Bounce buffer */
+#define	MAX_ADMA_DESC	3
+	u8 *adma_desc[MAX_ADMA_DESC];		/* ADMA descriptor table */
+	u8 *align_buffer[MAX_ADMA_DESC];	/* Bounce buffer */
+	int	adma_desc_index;	/* the last desc used */
+	int	adma_desc_ref;	/* check whether alloc/free desc balance */
 
-	dma_addr_t adma_addr;	/* Mapped ADMA descr. table */
-	dma_addr_t align_addr;	/* Mapped bounce buffer */
+#define TUNING_PATTERN_SIZE 256
+	char *tuning_pattern; /* buffer to SW tuning pattern */
 
 	struct tasklet_struct card_tasklet;	/* Tasklet structures */
 	struct tasklet_struct finish_tasklet;
+
+	struct workqueue_struct *card_workqueue;	/* Workqueue structures */
+	struct work_struct card_work;
 
 	struct timer_list timer;	/* Timer for timeouts */
 
@@ -180,8 +213,14 @@ struct sdhci_host {
 
 	unsigned int		tuning_count;	/* Timer count for re-tuning */
 	unsigned int		tuning_mode;	/* Re-tuning mode supported by host */
+	unsigned int		tuning_tt_cnt;	/* HW tuning total count */
+	unsigned int		tuning_wd_cnt;	/* HW tuning pass window count */
 #define SDHCI_TUNING_MODE_1	0
 	struct timer_list	tuning_timer;	/* Timer for tuning */
+	int	constrain_ref;
+
+	bool sdio_irq_enabled;
+	bool boot_complete;
 
 	unsigned long private[0] ____cacheline_aligned;
 };

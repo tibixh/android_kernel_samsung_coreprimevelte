@@ -2,6 +2,8 @@ menu "Device Drivers"
 
 source "drivers/base/Kconfig"
 
+source "drivers/battery/Kconfig"
+
 source "drivers/bus/Kconfig"
 
 source "drivers/connector/Kconfig"
@@ -98,6 +100,8 @@ source "drivers/memstick/Kconfig"
 
 source "drivers/leds/Kconfig"
 
+source "drivers/switch/Kconfig"
+
 source "drivers/accessibility/Kconfig"
 
 source "drivers/infiniband/Kconfig"
@@ -170,4 +174,9 @@ source "drivers/phy/Kconfig"
 
 source "drivers/powercap/Kconfig"
 
+source "drivers/sensors/Kconfig"
+
+source "drivers/marvell/Kconfig"
+
+source "drivers/samsung/Kconfig"
 endmenu

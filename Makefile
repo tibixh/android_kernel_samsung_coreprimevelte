@@ -195,8 +195,10 @@ SUBARCH := $(shell uname -m | sed -e s/i.86/x86/ -e s/x86_64/x86/ \
 # "make" in the configured kernel build directory always uses that.
 # Default value for CROSS_COMPILE is not to prefix executables
 # Note: Some architectures assign CROSS_COMPILE in their arch/*/Makefile
-ARCH		?= $(SUBARCH)
-CROSS_COMPILE	?= $(CONFIG_CROSS_COMPILE:"%"=%)
+#ARCH		?= $(SUBARCH)
+#CROSS_COMPILE	?= $(CONFIG_CROSS_COMPILE:"%"=%)
+ARCH		?= arm64
+CROSS_COMPILE= ../PLATFORM/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.8/bin/aarch64-linux-android-
 
 # Architecture as present in compile.h
 UTS_MACHINE 	:= $(ARCH)
@@ -344,6 +346,7 @@ OBJCOPY		= $(CROSS_COMPILE)objcopy
 OBJDUMP		= $(CROSS_COMPILE)objdump
 AWK		= awk
 GENKSYMS	= scripts/genksyms/genksyms
+CGITINFO	= scripts/cgitinfo
 INSTALLKERNEL  := installkernel
 DEPMOD		= /sbin/depmod
 PERL		= perl
@@ -351,10 +354,10 @@ CHECK		= sparse
 
 CHECKFLAGS     := -D__linux__ -Dlinux -D__STDC__ -Dunix -D__unix__ \
 		  -Wbitwise -Wno-return-void $(CF)
-CFLAGS_MODULE   =
+CFLAGS_MODULE   = -Wno-unused
 AFLAGS_MODULE   =
 LDFLAGS_MODULE  =
-CFLAGS_KERNEL	=
+CFLAGS_KERNEL	= -Wno-unused
 AFLAGS_KERNEL	=
 CFLAGS_GCOV	= -fprofile-arcs -ftest-coverage
 
@@ -406,6 +409,8 @@ export KBUILD_AFLAGS AFLAGS_KERNEL AFLAGS_MODULE
 export KBUILD_AFLAGS_MODULE KBUILD_CFLAGS_MODULE KBUILD_LDFLAGS_MODULE
 export KBUILD_AFLAGS_KERNEL KBUILD_CFLAGS_KERNEL
 export KBUILD_ARFLAGS
+
+export CGITINFO
 
 # When compiling out-of-tree modules, put MODVERDIR in the module
 # tree rather than in the kernel tree. The kernel tree might
@@ -639,6 +644,9 @@ KBUILD_CFLAGS	+= -fomit-frame-pointer
 endif
 endif
 
+# For built-in tzdd
+KBUILD_CFLAGS	+= -Idrivers/marvell/security/mmp-tzdd/inc
+
 KBUILD_CFLAGS   += $(call cc-option, -fno-var-tracking-assignments)
 
 ifdef CONFIG_DEBUG_INFO
@@ -736,7 +744,8 @@ export	INSTALL_PATH ?= /boot
 # makefile but the argument can be passed to make if needed.
 #
 
-MODLIB	= $(INSTALL_MOD_PATH)/lib/modules/$(KERNELRELEASE)
+#MODLIB	= $(INSTALL_MOD_PATH)/lib/modules/$(KERNELRELEASE)
+MODLIB = $(INSTALL_MOD_PATH)/lib/modules
 export MODLIB
 
 #
@@ -848,7 +857,8 @@ endef
 
 # Store (new) KERNELRELEASE string in include/config/kernel.release
 include/config/kernel.release: include/config/auto.conf FORCE
-	$(call filechk,kernel.release)
+	$(Q)rm -f $@
+	$(Q)echo "$(KERNELVERSION)$$($(CONFIG_SHELL) $(srctree)/scripts/setlocalversion $(srctree))" > $@
 
 
 # Things we need to do before we recursively start building the kernel
@@ -1016,16 +1026,16 @@ modules_install: _modinst_ _modinst_post
 
 PHONY += _modinst_
 _modinst_:
-	@rm -rf $(MODLIB)/kernel
-	@rm -f $(MODLIB)/source
-	@mkdir -p $(MODLIB)/kernel
-	@ln -s $(srctree) $(MODLIB)/source
-	@if [ ! $(objtree) -ef  $(MODLIB)/build ]; then \
-		rm -f $(MODLIB)/build ; \
-		ln -s $(objtree) $(MODLIB)/build ; \
-	fi
-	@cp -f $(objtree)/modules.order $(MODLIB)/
-	@cp -f $(objtree)/modules.builtin $(MODLIB)/
+#	@rm -rf $(MODLIB)/kernel
+#	@rm -f $(MODLIB)/source
+#	@mkdir -p $(MODLIB)/kernel
+#	@ln -s $(srctree) $(MODLIB)/source
+#	@if [ ! $(objtree) -ef  $(MODLIB)/build ]; then \
+#		rm -f $(MODLIB)/build ; \
+#		ln -s $(objtree) $(MODLIB)/build ; \
+#	fi
+#	@cp -f $(objtree)/modules.order $(MODLIB)/
+#	@cp -f $(objtree)/modules.builtin $(MODLIB)/
 	$(Q)$(MAKE) -f $(srctree)/scripts/Makefile.modinst
 
 # This depmod is only for convenience to give the initial
@@ -1034,7 +1044,7 @@ _modinst_:
 PHONY += _modinst_post
 _modinst_post: _modinst_
 	$(Q)$(MAKE) -f $(srctree)/scripts/Makefile.fwinst obj=firmware __fw_modinst
-	$(call cmd,depmod)
+#	$(call cmd,depmod)
 
 ifeq ($(CONFIG_MODULE_SIG), y)
 PHONY += modules_sign
@@ -1454,9 +1464,12 @@ quiet_cmd_rmfiles = $(if $(wildcard $(rm-files)),CLEAN   $(wildcard $(rm-files))
       cmd_rmfiles = rm -f $(rm-files)
 
 # Run depmod only if we have System.map and depmod is executable
-quiet_cmd_depmod = DEPMOD  $(KERNELRELEASE)
-      cmd_depmod = $(CONFIG_SHELL) $(srctree)/scripts/depmod.sh $(DEPMOD) \
-                   $(KERNELRELEASE) "$(patsubst y,_,$(CONFIG_HAVE_UNDERSCORE_SYMBOL_PREFIX))"
+#quiet_cmd_depmod = DEPMOD  $(KERNELRELEASE)
+#      cmd_depmod = $(CONFIG_SHELL) $(srctree)/scripts/depmod.sh $(DEPMOD) \
+#                   $(KERNELRELEASE) "$(patsubst y,_,$(CONFIG_HAVE_UNDERSCORE_SYMBOL_PREFIX))"
+quiet_cmd_depmod = DEPMOD $(VERSION)$(if $(PATCHLEVEL),.$(PATCHLEVEL)$(if $(SUBLEVEL),.$(SUBLEVEL)))
+       cmd_depmod = $(CONFIG_SHELL) $(srctree)/scripts/depmod.sh $(DEPMOD) \
+		    $(VERSION)$(if $(PATCHLEVEL),.$(PATCHLEVEL)$(if $(SUBLEVEL),.$(SUBLEVEL)))
 
 # Create temporary dir for module support files
 # clean it up only when building all modules

@@ -2,7 +2,7 @@
 # Makefile for Marvell's PXA168 processors line
 #
 
-obj-y				+= common.o devices.o time.o
+obj-y				+= common.o devices.o regdump-mmp.o
 
 # SoC support
 obj-$(CONFIG_CPU_PXA168)	+= pxa168.o
@@ -21,6 +21,9 @@ obj-$(CONFIG_CPU_PXA910)	+= pm-pxa910.o
 obj-$(CONFIG_CPU_MMP2)		+= pm-mmp2.o
 endif
 
+# coresight support
+obj-$(CONFIG_CORESIGHT_SUPPORT) += coresight-v7.o
+
 # board support
 obj-$(CONFIG_MACH_ASPENITE)	+= aspenite.o
 obj-$(CONFIG_MACH_ZYLONITE2)	+= aspenite.o
@@ -32,5 +35,9 @@ obj-$(CONFIG_MACH_FLINT)	+= flint.o
 obj-$(CONFIG_MACH_MARVELL_JASPER) += jasper.o
 obj-$(CONFIG_MACH_MMP_DT)	+= mmp-dt.o
 obj-$(CONFIG_MACH_MMP2_DT)	+= mmp2-dt.o
+obj-$(CONFIG_MACH_MMPX_DT)	+= mmpx-dt.o regs-addr.o v7_pm_setup.o mmp_cpuidle.o reset.o platsmp.o pxa988_lowpower.o restart.o
+ifeq ($(CONFIG_SUSPEND),y)
+obj-$(CONFIG_ARCH_MMP)		+= pm.o pm-pxa1L88.o
+endif
 obj-$(CONFIG_MACH_TETON_BGA)	+= teton_bga.o
 obj-$(CONFIG_MACH_GPLUGD)	+= gplugd.o

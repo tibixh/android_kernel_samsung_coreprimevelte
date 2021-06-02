@@ -590,6 +590,7 @@ static int soc_pcm_prepare(struct snd_pcm_substream *substream)
 			SND_SOC_DAPM_STREAM_START);
 
 	snd_soc_dai_digital_mute(codec_dai, 0, substream->stream);
+	snd_soc_dai_digital_mute(cpu_dai, 0, substream->stream);
 
 out:
 	mutex_unlock(&rtd->pcm_mutex);
@@ -709,10 +710,16 @@ static int soc_pcm_hw_free(struct snd_pcm_substream *substream)
 		codec_dai->sample_bits = 0;
 	}
 
+	/*
+	 * Muting the DAC suppresses artifacts caused during digital
+	 * shutdown, for example from stopping clocks.
+	 */
 	/* apply codec digital mute */
 	if ((playback && codec_dai->playback_active == 1) ||
-	    (!playback && codec_dai->capture_active == 1))
+	    (!playback && codec_dai->capture_active == 1)) {
 		snd_soc_dai_digital_mute(codec_dai, 1, substream->stream);
+		snd_soc_dai_digital_mute(cpu_dai, 1, substream->stream);
+	}
 
 	/* free any machine hw params */
 	if (rtd->dai_link->ops && rtd->dai_link->ops->hw_free)
@@ -945,7 +952,7 @@ static struct snd_soc_pcm_runtime *dpcm_get_be(struct snd_soc_card *card,
 		}
 	}
 
-	dev_err(card->dev, "ASoC: can't get %s BE for %s\n",
+	dev_dbg(card->dev, "ASoC: can't get %s BE for %s\n",
 		stream ? "capture" : "playback", widget->name);
 	return NULL;
 }
@@ -984,9 +991,26 @@ static int widget_in_list(struct snd_soc_dapm_widget_list *list,
 int dpcm_path_get(struct snd_soc_pcm_runtime *fe,
 	int stream, struct snd_soc_dapm_widget_list **list_)
 {
-	struct snd_soc_dai *cpu_dai = fe->cpu_dai;
+	/* Fixme: In MAP, we use codec name as DAPM widget */
+	struct snd_soc_dai *dai;
 	struct snd_soc_dapm_widget_list *list;
 	int paths;
+
+	dai = fe->cpu_dai;
+	if (!dai->playback_widget && (stream == SNDRV_PCM_STREAM_PLAYBACK)) {
+		dai = fe->codec_dai;
+		if (!dai->playback_widget) {
+			dev_err(fe->dev, "ASoC: can't find playback_widget\n");
+			return -EINVAL;
+		}
+	}
+	if (!dai->capture_widget && (stream == SNDRV_PCM_STREAM_CAPTURE)) {
+		dai = fe->codec_dai;
+		if (!dai->capture_widget) {
+			dev_err(fe->dev, "ASoC: can't find capture_widget\n");
+			return -EINVAL;
+		}
+	}
 
 	list = kzalloc(sizeof(struct snd_soc_dapm_widget_list) +
 			sizeof(struct snd_soc_dapm_widget *), GFP_KERNEL);
@@ -994,7 +1018,7 @@ int dpcm_path_get(struct snd_soc_pcm_runtime *fe,
 		return -ENOMEM;
 
 	/* get number of valid DAI paths and their widgets */
-	paths = snd_soc_dapm_dai_get_connected_widgets(cpu_dai, stream, &list);
+	paths = snd_soc_dapm_dai_get_connected_widgets(dai, stream, &list);
 
 	dev_dbg(fe->dev, "ASoC: found %d audio %s paths\n", paths,
 			stream ? "capture" : "playback");
@@ -1062,7 +1086,7 @@ static int dpcm_add_paths(struct snd_soc_pcm_runtime *fe, int stream,
 		/* is there a valid BE rtd for this widget */
 		be = dpcm_get_be(card, list->widgets[i], stream);
 		if (!be) {
-			dev_err(fe->dev, "ASoC: no BE found for %s\n",
+			dev_dbg(fe->dev, "ASoC: no BE found for %s\n",
 					list->widgets[i]->name);
 			continue;
 		}
@@ -1245,19 +1269,6 @@ static void dpcm_init_runtime_hw(struct snd_pcm_runtime *runtime,
 	runtime->hw.rates = stream->rates;
 }
 
-static void dpcm_set_fe_runtime(struct snd_pcm_substream *substream)
-{
-	struct snd_pcm_runtime *runtime = substream->runtime;
-	struct snd_soc_pcm_runtime *rtd = substream->private_data;
-	struct snd_soc_dai *cpu_dai = rtd->cpu_dai;
-	struct snd_soc_dai_driver *cpu_dai_drv = cpu_dai->driver;
-
-	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
-		dpcm_init_runtime_hw(runtime, &cpu_dai_drv->playback);
-	else
-		dpcm_init_runtime_hw(runtime, &cpu_dai_drv->capture);
-}
-
 static int dpcm_fe_dai_do_trigger(struct snd_pcm_substream *substream, int cmd);
 
 /* Set FE's runtime_update state; the state is protected via PCM stream lock
@@ -1266,8 +1277,7 @@ static int dpcm_fe_dai_do_trigger(struct snd_pcm_substream *substream, int cmd);
  * process the pending trigger action here.
  */
 static void dpcm_set_fe_update_state(struct snd_soc_pcm_runtime *fe,
-				     int stream, enum snd_soc_dpcm_update state)
-{
+				     int stream, enum snd_soc_dpcm_update state) {
 	struct snd_pcm_substream *substream =
 		snd_soc_dpcm_get_substream(fe, stream);
 
@@ -1279,6 +1289,19 @@ static void dpcm_set_fe_update_state(struct snd_soc_pcm_runtime *fe,
 	}
 	fe->dpcm[stream].runtime_update = state;
 	snd_pcm_stream_unlock_irq(substream);
+}
+
+static void dpcm_set_fe_runtime(struct snd_pcm_substream *substream)
+{
+	struct snd_pcm_runtime *runtime = substream->runtime;
+	struct snd_soc_pcm_runtime *rtd = substream->private_data;
+	struct snd_soc_dai *cpu_dai = rtd->cpu_dai;
+	struct snd_soc_dai_driver *cpu_dai_drv = cpu_dai->driver;
+
+	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
+		dpcm_init_runtime_hw(runtime, &cpu_dai_drv->playback);
+	else
+		dpcm_init_runtime_hw(runtime, &cpu_dai_drv->capture);
 }
 
 static int dpcm_fe_dai_startup(struct snd_pcm_substream *fe_substream)
@@ -1398,7 +1421,11 @@ int dpcm_be_dai_hw_free(struct snd_soc_pcm_runtime *fe, int stream)
 
 		/* only free hw when no longer used - check all FEs */
 		if (!snd_soc_dpcm_can_be_free_stop(fe, be, stream))
-				continue;
+			continue;
+
+		/* if other FE is still use this BE, don't hw free it */
+		if (be->dpcm[stream].users > 1)
+			continue;
 
 		if ((be->dpcm[stream].state != SND_SOC_DPCM_STATE_HW_PARAMS) &&
 		    (be->dpcm[stream].state != SND_SOC_DPCM_STATE_PREPARE) &&
@@ -1465,7 +1492,6 @@ int dpcm_be_dai_hw_params(struct snd_soc_pcm_runtime *fe, int stream)
 			continue;
 
 		if ((be->dpcm[stream].state != SND_SOC_DPCM_STATE_OPEN) &&
-		    (be->dpcm[stream].state != SND_SOC_DPCM_STATE_HW_PARAMS) &&
 		    (be->dpcm[stream].state != SND_SOC_DPCM_STATE_HW_FREE))
 			continue;
 
@@ -1514,7 +1540,6 @@ unwind:
 			continue;
 
 		if ((be->dpcm[stream].state != SND_SOC_DPCM_STATE_OPEN) &&
-		   (be->dpcm[stream].state != SND_SOC_DPCM_STATE_HW_PARAMS) &&
 		   (be->dpcm[stream].state != SND_SOC_DPCM_STATE_HW_FREE) &&
 		   (be->dpcm[stream].state != SND_SOC_DPCM_STATE_STOP))
 			continue;
@@ -1805,12 +1830,15 @@ static int dpcm_fe_dai_prepare(struct snd_pcm_substream *substream)
 
 	dpcm_set_fe_update_state(fe, stream, SND_SOC_DPCM_UPDATE_FE);
 
+	/*
+	 * Fixme: Remove this constraint per audio team's request.
+	 * They want there is no dependency between alsa device operation
+	 * and dapm route selection.
+	 */
 	/* there is no point preparing this FE if there are no BEs */
 	if (list_empty(&fe->dpcm[stream].be_clients)) {
-		dev_err(fe->dev, "ASoC: no backend DAIs enabled for %s\n",
+		dev_dbg(fe->dev, "ASoC: no backend DAIs enabled for %s\n",
 				fe->dai_link->name);
-		ret = -EINVAL;
-		goto out;
 	}
 
 	ret = dpcm_be_dai_prepare(fe, substream->stream);
@@ -2024,7 +2052,12 @@ int soc_dpcm_runtime_update(struct snd_soc_card *card)
 			fe->dai_link->name);
 
 		/* skip if FE doesn't have playback capability */
-		if (!fe->cpu_dai->driver->playback.channels_min)
+		if (!fe->cpu_dai->driver->playback.channels_min ||
+				    !fe->codec_dai->driver->playback.channels_min)
+			goto capture;
+
+		/* skip if FE isn't currently playing */
+		if (!fe->cpu_dai->playback_active || !fe->codec_dai->playback_active)
 			goto capture;
 
 		paths = dpcm_path_get(fe, SNDRV_PCM_STREAM_PLAYBACK, &list);
@@ -2054,7 +2087,12 @@ int soc_dpcm_runtime_update(struct snd_soc_card *card)
 		dpcm_path_put(&list);
 capture:
 		/* skip if FE doesn't have capture capability */
-		if (!fe->cpu_dai->driver->capture.channels_min)
+		if (!fe->cpu_dai->driver->capture.channels_min ||
+				    !fe->codec_dai->driver->capture.channels_min)
+			continue;
+
+		/* skip if FE isn't currently capturing */
+		if (!fe->cpu_dai->capture_active || !fe->codec_dai->capture_active)
 			continue;
 
 		paths = dpcm_path_get(fe, SNDRV_PCM_STREAM_CAPTURE, &list);
@@ -2122,9 +2160,11 @@ static int dpcm_fe_dai_open(struct snd_pcm_substream *fe_substream)
 	mutex_lock_nested(&fe->card->mutex, SND_SOC_CARD_CLASS_RUNTIME);
 	fe->dpcm[stream].runtime = fe_substream->runtime;
 
-	if (dpcm_path_get(fe, stream, &list) <= 0) {
+	if (dpcm_path_get(fe, stream, &list) < 0) {
 		dev_dbg(fe->dev, "ASoC: %s no valid %s route\n",
 			fe->dai_link->name, stream ? "capture" : "playback");
+		mutex_unlock(&fe->card->mutex);
+		return -EINVAL;
 	}
 
 	/* calculate valid and active FE <-> BE dpcms */

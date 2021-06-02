@@ -81,6 +81,12 @@ SECTIONS
 		ARM_EXIT_KEEP(EXIT_TEXT)
 	}
 	. = ALIGN(16);
+	.init.arch.info : {
+		__arch_info_begin = .;
+		*(.arch.info.init)
+		__arch_info_end = .;
+	}
+	. = ALIGN(16);
 	.init.data : {
 		INIT_DATA
 		INIT_SETUP(16)
@@ -104,6 +110,13 @@ SECTIONS
 	_edata = .;
 
 	BSS_SECTION(0, 0, 0)
+
+	. = ALIGN(PAGE_SIZE);
+	idmap_pg_dir = .;
+	. += IDMAP_DIR_SIZE;
+	swapper_pg_dir = .;
+	. += SWAPPER_DIR_SIZE;
+
 	_end = .;
 
 	STABS_DEBUG

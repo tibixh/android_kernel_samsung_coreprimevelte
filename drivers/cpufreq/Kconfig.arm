@@ -249,3 +249,24 @@ config ARM_VEXPRESS_SPC_CPUFREQ
         help
           This add the CPUfreq driver support for Versatile Express
 	  big.LITTLE platforms using SPC for power management.
+
+config ARM_PXA988_CPUFREQ
+	bool "MARVELL PXA988 SoCs"
+	depends on CPU_PXA988
+	help
+	  This adds the CPUFreq driver for PXA988 and PXA1X88
+	  If in doubt, say N.
+
+config ARM_MMP_SMP_CPUFREQ
+	bool "MARVELL SMP SoC"
+	depends on ARCH_MMP
+	help
+	  This adds the CPUFreq driver for Marvell's MMP SoCs.
+	  If in doubt, say N.
+
+config ARM_MMP_BL_CPUFREQ
+	bool "MARVELL BL SoC"
+	depends on ARCH_MMP
+	help
+	  This adds the CPUFreq driver for Marvell's MMP SoCs with bL arch
+	  If in doubt, say N.

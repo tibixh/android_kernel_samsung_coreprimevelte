@@ -10,13 +10,17 @@ config ARM64
 	select ARM_AMBA
 	select ARM_ARCH_TIMER
 	select ARM_GIC
+	select AUDIT_ARCH_COMPAT_GENERIC
 	select BUILDTIME_EXTABLE_SORT
 	select CLONE_BACKWARDS
 	select COMMON_CLK
 	select CPU_PM if (SUSPEND || CPU_IDLE)
 	select DCACHE_WORD_ACCESS
+	select GENERIC_ALLOCATOR
 	select GENERIC_CLOCKEVENTS
 	select GENERIC_CLOCKEVENTS_BROADCAST if SMP
+	select GENERIC_CPU_AUTOPROBE
+	select GENERIC_IDLE_POLL_SETUP
 	select GENERIC_IOMAP
 	select GENERIC_IRQ_PROBE
 	select GENERIC_IRQ_SHOW
@@ -26,7 +30,9 @@ config ARM64
 	select GENERIC_STRNLEN_USER
 	select GENERIC_TIME_VSYSCALL
 	select HARDIRQS_SW_RESEND
+	select HAVE_ARCH_AUDITSYSCALL
 	select HAVE_ARCH_JUMP_LABEL
+	select HAVE_ARCH_SECCOMP_FILTER
 	select HAVE_ARCH_TRACEHOOK
 	select HAVE_DEBUG_BUGVERBOSE
 	select HAVE_DEBUG_KMEMLEAK
@@ -50,6 +56,8 @@ config ARM64
 	select RTC_LIB
 	select SPARSE_IRQ
 	select SYSCTL_EXCEPTION_TRACE
+	select CORESIGHT_SUPPORT
+	select CORESIGHT_TRACE_SUPPORT
 	help
 	  ARM 64-bit (AArch64) Linux support.
 
@@ -74,7 +82,7 @@ config LOCKDEP_SUPPORT
 config TRACE_IRQFLAGS_SUPPORT
 	def_bool y
 
-config RWSEM_GENERIC_SPINLOCK
+config RWSEM_XCHGADD_ALGORITHM
 	def_bool y
 
 config GENERIC_HWEIGHT
@@ -128,7 +136,20 @@ config ARCH_XGENE
 	help
 	  This enables support for AppliedMicro X-Gene SOC Family
 
+config ARCH_MMP
+	bool "Marvell MMP"
+	select ARCH_HAS_OPP
+	select ARCH_HAS_CPUFREQ
+	select ARCH_REQUIRE_GPIOLIB
+	select PINCTRL
+	select PINCTRL_SINGLE
+	select PM_GENERIC_DOMAINS
+	help
+	  This enables support for the Marvell MMP platforms.
+
 endmenu
+
+source "arch/arm64/mach/Kconfig"
 
 menu "Bus support"
 
@@ -138,6 +159,117 @@ config ARM_AMBA
 endmenu
 
 menu "Kernel Features"
+
+menu "ARM errata workarounds via the alternatives framework"
+
+config ARM64_ERRATUM_826319
+	bool "Cortex-A53: 826319: System might deadlock if a write cannot complete until read data is accepted"
+	default y
+	help
+	  This option adds an alternative code sequence to work around ARM
+	  erratum 826319 on Cortex-A53 parts up to r0p2 with an AMBA 4 ACE or
+	  AXI master interface and an L2 cache.
+
+	  If a Cortex-A53 uses an AMBA AXI4 ACE interface to other processors
+	  and is unable to accept a certain write via this interface, it will
+	  not progress on read data presented on the read data channel and the
+	  system can deadlock.
+
+	  The workaround promotes data cache clean instructions to
+	  data cache clean-and-invalidate.
+	  Please note that this does not necessarily enable the workaround,
+	  as it depends on the alternative framework, which will only patch
+	  the kernel if an affected CPU is detected.
+
+	  If unsure, say Y.
+
+config ARM64_ERRATUM_827319
+	bool "Cortex-A53: 827319: Data cache clean instructions might cause overlapping transactions to the interconnect"
+	default y
+	help
+	  This option adds an alternative code sequence to work around ARM
+	  erratum 827319 on Cortex-A53 parts up to r0p2 with an AMBA 5 CHI
+	  master interface and an L2 cache.
+
+	  Under certain conditions this erratum can cause a clean line eviction
+	  to occur at the same time as another transaction to the same address
+	  on the AMBA 5 CHI interface, which can cause data corruption if the
+	  interconnect reorders the two transactions.
+
+	  The workaround promotes data cache clean instructions to
+	  data cache clean-and-invalidate.
+	  Please note that this does not necessarily enable the workaround,
+	  as it depends on the alternative framework, which will only patch
+	  the kernel if an affected CPU is detected.
+
+	  If unsure, say Y.
+
+config ARM64_ERRATUM_824069
+	bool "Cortex-A53: 824069: Cache line might not be marked as clean after a CleanShared snoop"
+	default y
+	help
+	  This option adds an alternative code sequence to work around ARM
+	  erratum 824069 on Cortex-A53 parts up to r0p2 when it is connected
+	  to a coherent interconnect.
+
+	  If a Cortex-A53 processor is executing a store or prefetch for
+	  write instruction at the same time as a processor in another
+	  cluster is executing a cache maintenance operation to the same
+	  address, then this erratum might cause a clean cache line to be
+	  incorrectly marked as dirty.
+
+	  The workaround promotes data cache clean instructions to
+	  data cache clean-and-invalidate.
+	  Please note that this option does not necessarily enable the
+	  workaround, as it depends on the alternative framework, which will
+	  only patch the kernel if an affected CPU is detected.
+
+	  If unsure, say Y.
+
+config ARM64_ERRATUM_845719
+	bool "Cortex-A53: 845719: a load might read incorrect data"
+	depends on COMPAT
+	default y
+	help
+	  This option adds an alternative code sequence to avoid ARM
+	  erratum 845719 on Cortex-A53 parts up to r0p4.
+
+	  When running a compat (AArch32) userspace on an affected Cortex-A53
+	  part, a load at EL0 from a virtual address that matches the bottom 32
+	  bits of the virtual address used by a recent load at (AArch64) EL1
+	  might return incorrect data.
+
+	  The fix is to write the contextidr_el1 register on exception
+	  return to a 32-bit task.
+
+	  If unsure, say Y.
+
+config SECCOMP
+	bool "Enable seccomp to safely compute untrusted bytecode"
+	---help---
+	  This kernel feature is useful for number crunching applications
+	  that may need to compute untrusted bytecode during their
+	  execution. By using pipes or other transports made available to
+	  the process as file descriptors supporting the read/write
+	  syscalls, it's possible to isolate those applications in
+	  their own address space using seccomp. Once seccomp is
+	  enabled via prctl(PR_SET_SECCOMP), it cannot be disabled
+	  and the task is only allowed to execute a few safe syscalls
+	  defined by each seccomp mode.
+
+endmenu
+
+config FORCE_INSTRUCTION_ALIGNMENT
+	bool "Force instructions address alignment"
+	default n
+	help
+	  Branching to an address in ARM state which is not word aligned,
+	  where this is defined to be UNPREDICTABLE, can cause one of the following two behaviours:
+		1. The unaligned location is forced to be aligned.
+		2. Using the unaligned address generates a Prefetch Abort
+		on the first instruction using the unaligned PC value.
+	  To be consistant for the user space binaries, the unaligned location is forced aligned with this config.
+	  If unsure, say N.
 
 config ARM64_64K_PAGES
 	bool "Enable 64KB pages support"
@@ -165,6 +297,162 @@ config SMP
 
 	  If you don't know what to do here, say N.
 
+config SCHED_MC
+	bool "Multi-core scheduler support"
+	depends on SMP
+	help
+	  Multi-core scheduler support improves the CPU scheduler's decision
+	  making when dealing with multi-core CPU chips at a cost of slightly
+	  increased overhead in some places. If unsure say N here.
+
+config SCHED_SMT
+	bool "SMT scheduler support"
+	depends on SMP
+	help
+	  Improves the CPU scheduler's decision making when dealing with
+	  MultiThreading at a cost of slightly increased overhead in some
+	  places. If unsure say N here.
+
+config DISABLE_CPU_SCHED_DOMAIN_BALANCE
+	bool "(EXPERIMENTAL) Disable CPU level scheduler load-balancing"
+	help
+	  Disables scheduler load-balancing at CPU sched domain level.
+
+config SCHED_HMP
+	bool "(EXPERIMENTAL) Heterogenous multiprocessor scheduling"
+	depends on DISABLE_CPU_SCHED_DOMAIN_BALANCE && SCHED_MC && FAIR_GROUP_SCHED && !SCHED_AUTOGROUP
+	help
+	  Experimental scheduler optimizations for heterogeneous platforms.
+	  Attempts to introspectively select task affinity to optimize power
+	  and performance. Basic support for multiple (>2) cpu types is in place,
+	  but it has only been tested with two types of cpus.
+	  There is currently no support for migration of task groups, hence
+	  !SCHED_AUTOGROUP. Furthermore, normal load-balancing must be disabled
+	  between cpus of different type (DISABLE_CPU_SCHED_DOMAIN_BALANCE).
+	  When turned on, this option adds sys/kernel/hmp directory which
+	  contains the following files:
+	  up_threshold - the load average threshold used for up migration
+	                 (0 - 1023)
+	  down_threshold - the load average threshold used for down migration
+	                 (0 - 1023)
+	  hmp_domains - a list of cpumasks for the present HMP domains,
+	                starting with the 'biggest' and ending with the
+	                'smallest'.
+	  Note that both the threshold files can be written at runtime to
+	  control scheduler behaviour.
+
+config SCHED_HMP_PRIO_FILTER
+	bool "(EXPERIMENTAL) Filter HMP migrations by task priority"
+	depends on SCHED_HMP
+	help
+	  Enables task priority based HMP migration filter. Any task with
+	  a NICE value above the threshold will always be on low-power cpus
+	  with less compute capacity.
+
+config SCHED_HMP_PRIO_FILTER_VAL
+	int "NICE priority threshold"
+	default 5
+	depends on SCHED_HMP_PRIO_FILTER
+
+config HMP_FAST_CPU_MASK
+	string "HMP scheduler fast CPU mask"
+	depends on SCHED_HMP
+	help
+          Leave empty to use device tree information.
+	  Specify the cpuids of the fast CPUs in the system as a list string,
+	  e.g. cpuid 0+1 should be specified as 0-1.
+
+config HMP_SLOW_CPU_MASK
+	string "HMP scheduler slow CPU mask"
+	depends on SCHED_HMP
+	help
+	  Leave empty to use device tree information.
+	  Specify the cpuids of the slow CPUs in the system as a list string,
+	  e.g. cpuid 0+1 should be specified as 0-1.
+
+config HMP_VARIABLE_SCALE
+	bool "Allows changing the load tracking scale through sysfs"
+	depends on SCHED_HMP
+	help
+	  When turned on, this option exports the load average period value
+	  for the load tracking patches through sysfs.
+	  The values can be modified to change the rate of load accumulation
+	  used for HMP migration. 'load_avg_period_ms' is the time in ms to
+	  reach a load average of 0.5 for an idle task of 0 load average
+	  ratio which becomes 100% busy.
+	  For example, with load_avg_period_ms = 128 and up_threshold = 512,
+	  a running task with a load of 0 will be migrated to a bigger CPU after
+	  128ms, because after 128ms its load_avg_ratio is 0.5 and the real
+	  up_threshold is 0.5.
+	  This patch has the same behavior as changing the Y of the load
+	  average computation to
+	        (1002/1024)^(LOAD_AVG_PERIOD/load_avg_period_ms)
+	  but removes intermediate overflows in computation.
+
+config HMP_FREQUENCY_INVARIANT_SCALE
+	bool "(EXPERIMENTAL) Frequency-Invariant Tracked Load for HMP"
+	depends on SCHED_HMP && CPU_FREQ
+	help
+	  Scales the current load contribution in line with the frequency
+	  of the CPU that the task was executed on.
+	  In this version, we use a simple linear scale derived from the
+	  maximum frequency reported by CPUFreq.
+	  Restricting tracked load to be scaled by the CPU's frequency
+	  represents the consumption of possible compute capacity
+	  (rather than consumption of actual instantaneous capacity as
+	  normal) and allows the HMP migration's simple threshold
+	  migration strategy to interact more predictably with CPUFreq's
+	  asynchronous compute capacity changes.
+
+config SCHED_HMP_LITTLE_PACKING
+	bool "Small task packing for HMP"
+	depends on SCHED_HMP
+	default n
+	help
+	  Allows the HMP Scheduler to pack small tasks into CPUs in the
+	  smallest HMP domain.
+	  Controlled by two sysfs files in sys/kernel/hmp.
+	  packing_enable: 1 to enable, 0 to disable packing. Default 1.
+	  packing_limit: runqueue load ratio where a RQ is considered
+	    to be full. Default is NICE_0_LOAD * 9/8.
+
+config HMP_BOOST
+	bool "HMP boosting"
+	depends on SCHED_HMP
+	default n
+	help
+	  Enable feature of HMP boosting which the heaviest task allows
+	  up migration.
+
+config HMP_REAL_HEAVIEST_PICK
+	bool "Heaviest task searching change for HMP"
+	depends on SCHED_HMP
+	default n
+	help
+	  Heaviest task search all of the cfs runqueues.
+	  android basically 3 scheduling group.
+	  previous checking only current se runqueue.
+
+config HMP_DEBUG
+	bool "Debug feature for HMP"
+	depends on SCHED_HMP
+	default n
+	help
+	  Debug feature for HMP.
+
+config TEXT_OFFSET_OVERRIDE
+	bool "Enable CONFIG_TEXT_OFFSET"
+	default n
+	help
+	  It defines the start of .text of kernel.
+	  Some SOCes may not start from 0x80000, and it want
+	  to reserve a memory region. So select this config.
+
+config TEXT_OFFSET
+	hex "Specific kernel TEXT offset from PAGE_OFFSET"
+	depends on TEXT_OFFSET_OVERRIDE
+	default 0x00080000
+
 config NR_CPUS
 	int "Maximum number of CPUs (2-32)"
 	range 2 32
@@ -189,8 +477,10 @@ config ARCH_HAS_HOLES_MEMORYMODEL
 	def_bool y if SPARSEMEM
 
 config ARCH_SPARSEMEM_ENABLE
-	def_bool y
-	select SPARSEMEM_VMEMMAP_ENABLE
+	bool
+
+config SPARSEMEM_VMEMMAP_ENABLE
+	def_bool ARCH_SPARSEMEM_ENABLE
 
 config ARCH_SPARSEMEM_DEFAULT
 	def_bool ARCH_SPARSEMEM_ENABLE
@@ -223,6 +513,14 @@ config HAVE_ARCH_TRANSPARENT_HUGEPAGE
 
 source "mm/Kconfig"
 
+config KEXEC
+	bool "kexec system call"
+	---help---
+	  kexec is a system call that implements the ability to shutdown your
+	  current kernel, and to start another kernel.  It is like a reboot
+	  but it is independent of the system firmware.   And like a reboot
+	  you can start any kernel with it, not just Linux.
+
 config XEN_DOM0
 	def_bool y
 	depends on XEN
@@ -239,6 +537,84 @@ config FORCE_MAX_ZONEORDER
 	default "14" if (ARM64_64K_PAGES && TRANSPARENT_HUGEPAGE)
 	default "11"
 
+config ARM64_FLUSH_CONSOLE_ON_RESTART
+	bool "Force flush the console on restart"
+	help
+	  If the console is locked while the system is rebooted, the messages
+	  in the temporary logbuffer would not have propogated to all the
+	  console drivers. This option forces the console lock to be
+	  released if it failed to be acquired, which will cause all the
+	  pending messages to be flushed.
+
+comment "Processor Features"
+
+menuconfig ARMV8_DEPRECATED
+	bool "Emulate deprecated/obsolete ARMv8 instructions"
+	depends on COMPAT
+	help
+	  Legacy software support may require certain instructions
+	  that have been deprecated or obsoleted in the architecture.
+
+	  Enable this config to enable selective emulation of these
+	  features.
+
+	  If unsure, say Y
+
+if ARMV8_DEPRECATED
+
+config SWP_EMULATION
+	bool "Emulate SWP/SWPB instructions"
+	help
+	  ARMv8 obsoletes the use of A32 SWP/SWPB instructions such that
+	  they are always undefined. Say Y here to enable software
+	  emulation of these instructions for userspace using LDXR/STXR.
+
+	  In some older versions of glibc [<=2.8] SWP is used during futex
+	  trylock() operations with the assumption that the code will not
+	  be preempted. This invalid assumption may be more likely to fail
+	  with SWP emulation enabled, leading to deadlock of the user
+	  application.
+
+	  NOTE: when accessing uncached shared regions, LDXR/STXR rely
+	  on an external transaction monitoring block called a global
+	  monitor to maintain update atomicity. If your system does not
+	  implement a global monitor, this option can cause programs that
+	  perform SWP operations to uncached memory to deadlock.
+
+	  If unsure, say Y
+
+config CP15_BARRIER_EMULATION
+	bool "Emulate CP15 Barrier instructions"
+	help
+	  The CP15 barrier instructions - CP15ISB, CP15DSB, and
+	  CP15DMB - are deprecated in ARMv8 (and ARMv7). It is
+	  strongly recommended to use the ISB, DSB, and DMB
+	  instructions instead.
+
+	  Say Y here to enable software emulation of these
+	  instructions for AArch32 userspace code. When this option is
+	  enabled, CP15 barrier usage is traced which can help
+	  identify software that needs updating.
+
+	  If unsure, say Y
+
+config SETEND_EMULATION
+	bool "Emulate SETEND instruction"
+	help
+	  The SETEND instruction alters the data-endianness of the
+	  AArch32 EL0, and is deprecated in ARMv8.
+
+	  Say Y here to enable software emulation of the instruction
+	  for AArch32 userspace code.
+
+	  Note: All the cpus on the system must have mixed endian support at EL0
+	  for this feature to be enabled. If a new CPU - which doesn't support mixed
+	  endian - is hotplugged in after this feature has been enabled, there could
+	  be unexpected results in the applications.
+
+	  If unsure, say Y
+endif
+
 endmenu
 
 menu "Boot options"
@@ -251,6 +627,23 @@ config CMDLINE
 	  entering them here. As a minimum, you should specify the the
 	  root device (e.g. root=/dev/nfs).
 
+choice
+	prompt "Kernel command line type" if CMDLINE != ""
+	default CMDLINE_FROM_BOOTLOADER
+
+config CMDLINE_FROM_BOOTLOADER
+	bool "Use bootloader kernel arguments if available"
+	help
+	  Uses the command-line options passed by the boot loader. If
+	  the boot loader doesn't provide any, the default kernel command
+	  string provided in CMDLINE will be used.
+
+config CMDLINE_EXTEND
+	bool "Extend bootloader kernel arguments"
+	help
+	  The command-line arguments provided by the boot loader will be
+	  appended to the default kernel command string.
+
 config CMDLINE_FORCE
 	bool "Always use the default kernel command string"
 	help
@@ -258,6 +651,22 @@ config CMDLINE_FORCE
 	  loader passes other arguments to the kernel.
 	  This is useful if you cannot or don't want to change the
 	  command-line options your boot loader passes to the kernel.
+endchoice
+
+config BUILD_ARM64_APPENDED_DTB_IMAGE
+	bool "Build a concatenated Image.gz/dtb by default"
+	depends on OF
+	help
+	  Enabling this option will cause a concatenated Image.gz and list of
+	  DTBs to be built by default (instead of a standalone Image.gz.)
+	  The image will built in arch/arm64/boot/Image.gz-dtb
+
+config BUILD_ARM64_APPENDED_DTB_IMAGE_NAMES
+	string "Default dtb names"
+	depends on BUILD_ARM64_APPENDED_DTB_IMAGE
+	help
+	  Space separated list of names of dtbs to append when
+	  building a concatenated Image.gz-dtb.
 
 endmenu
 
@@ -300,7 +709,10 @@ endmenu
 
 menu "CPU Power Management"
 
+source "drivers/cpufreq/Kconfig"
 source "drivers/cpuidle/Kconfig"
+
+source "drivers/cpuhotplug/Kconfig"
 
 endmenu
 
@@ -317,5 +729,8 @@ source "arch/arm64/Kconfig.debug"
 source "security/Kconfig"
 
 source "crypto/Kconfig"
+if CRYPTO
+source "arch/arm64/crypto/Kconfig"
+endif
 
 source "lib/Kconfig"

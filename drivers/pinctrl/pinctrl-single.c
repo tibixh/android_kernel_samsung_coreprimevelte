@@ -662,6 +662,7 @@ static int pcs_pinconf_get(struct pinctrl_dev *pctldev,
 			break;
 		case PIN_CONFIG_DRIVE_STRENGTH:
 		case PIN_CONFIG_SLEW_RATE:
+		case PIN_CONFIG_LOW_POWER_MODE:
 		default:
 			*config = data;
 			break;
@@ -699,6 +700,7 @@ static int pcs_pinconf_set(struct pinctrl_dev *pctldev,
 			case PIN_CONFIG_INPUT_SCHMITT:
 			case PIN_CONFIG_DRIVE_STRENGTH:
 			case PIN_CONFIG_SLEW_RATE:
+			case PIN_CONFIG_LOW_POWER_MODE:
 				shift = ffs(func->conf[i].mask) - 1;
 				data &= ~func->conf[i].mask;
 				data |= (arg << shift) & func->conf[i].mask;
@@ -1101,6 +1103,7 @@ static int pcs_parse_pinconf(struct pcs_device *pcs, struct device_node *np,
 		{ "pinctrl-single,drive-strength", PIN_CONFIG_DRIVE_STRENGTH, },
 		{ "pinctrl-single,slew-rate", PIN_CONFIG_SLEW_RATE, },
 		{ "pinctrl-single,input-schmitt", PIN_CONFIG_INPUT_SCHMITT, },
+		{ "pinctrl-single,lpm-output", PIN_CONFIG_LOW_POWER_MODE, },
 	};
 	struct pcs_conf_type prop4[] = {
 		{ "pinctrl-single,bias-pullup", PIN_CONFIG_BIAS_PULL_UP, },
@@ -2053,7 +2056,18 @@ static struct platform_driver pcs_driver = {
 #endif
 };
 
-module_platform_driver(pcs_driver);
+static int __init pcs_driver_init(void)
+{
+	return platform_driver_register(&pcs_driver);
+}
+
+static void __exit pcs_driver_exit(void)
+{
+	platform_driver_unregister(&pcs_driver);
+}
+
+subsys_initcall(pcs_driver_init);
+module_exit(pcs_driver_exit);
 
 MODULE_AUTHOR("Tony Lindgren <tony@atomide.com>");
 MODULE_DESCRIPTION("One-register-per-pin type device tree based pinctrl driver");

@@ -20,6 +20,7 @@ LIBGCC 		:= $(shell $(CC) $(KBUILD_CFLAGS) -print-libgcc-file-name)
 KBUILD_DEFCONFIG := defconfig
 
 KBUILD_CFLAGS	+= -mgeneral-regs-only
+KBUILD_CFLAGS	+= -fno-pic
 ifeq ($(CONFIG_CPU_BIG_ENDIAN), y)
 KBUILD_CPPFLAGS	+= -mbig-endian
 AS		+= -EB
@@ -38,18 +39,27 @@ CHECKFLAGS	+= -D__aarch64__
 head-y		:= arch/arm64/kernel/head.o
 
 # The byte offset of the kernel image in RAM from the start of RAM.
-TEXT_OFFSET := 0x00080000
+textofs-y	:= 0x00080000
+textofs-$(CONFIG_TEXT_OFFSET_OVERRIDE)	:= $(CONFIG_TEXT_OFFSET)
+
+TEXT_OFFSET := $(textofs-y)
 
 export	TEXT_OFFSET GZFLAGS
 
-core-y		+= arch/arm64/kernel/ arch/arm64/mm/
+core-y		+= arch/arm64/kernel/ arch/arm64/mm/ arch/arm64/mach/ arch/arm64/mcpm/ arch/arm64/plat-mmp/
 core-$(CONFIG_KVM) += arch/arm64/kvm/
 core-$(CONFIG_XEN) += arch/arm64/xen/
+core-$(CONFIG_CRYPTO) += arch/arm64/crypto/
 libs-y		:= arch/arm64/lib/ $(libs-y)
 libs-y		+= $(LIBGCC)
 
 # Default target when executing plain make
+ifeq ($(CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE),y)
+KBUILD_IMAGE	:= Image.gz-dtb
+else
 KBUILD_IMAGE	:= Image.gz
+endif
+
 KBUILD_DTBS	:= dtbs
 
 all:	$(KBUILD_IMAGE) $(KBUILD_DTBS)
@@ -67,6 +77,9 @@ zinstall install: vmlinux
 
 dtbs: scripts
 	$(Q)$(MAKE) $(build)=$(boot)/dts dtbs
+
+Image.gz-dtb: vmlinux scripts dtbs
+	$(Q)$(MAKE) $(build)=$(boot) $(boot)/$@
 
 PHONY += vdso_install
 vdso_install:

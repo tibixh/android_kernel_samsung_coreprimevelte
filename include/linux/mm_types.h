@@ -28,6 +28,15 @@ struct address_space;
 		IS_ENABLED(CONFIG_ARCH_ENABLE_SPLIT_PMD_PTLOCK))
 #define ALLOC_SPLIT_PTLOCKS	(SPINLOCK_SIZE > BITS_PER_LONG/8)
 
+struct tracker {
+#ifdef CONFIG_STACKTRACE
+	unsigned long addrs[8];	/* Called from address */
+#endif
+	unsigned long when;	/* When did the operation occur */
+	int pid;		/* Pid context */
+};
+
+
 /*
  * Each physical page in the system has a struct page associated with
  * it to keep track of whatever it is we are using the page for at the
@@ -182,6 +191,7 @@ struct page {
 #endif /* WANT_PAGE_VIRTUAL */
 #ifdef CONFIG_WANT_PAGE_DEBUG_FLAGS
 	unsigned long debug_flags;	/* Use atomic bitops on this */
+	struct tracker tracker[2];
 #endif
 
 #ifdef CONFIG_KMEMCHECK
@@ -273,6 +283,10 @@ struct vm_area_struct {
 	 * For areas with an address space and backing store,
 	 * linkage into the address_space->i_mmap interval tree, or
 	 * linkage of vma in the address_space->i_mmap_nonlinear list.
+	 *
+	 * For private anonymous mappings, a pointer to a null terminated string
+	 * in the user process containing the name given to the vma, or NULL
+	 * if unnamed.
 	 */
 	union {
 		struct {
@@ -280,6 +294,7 @@ struct vm_area_struct {
 			unsigned long rb_subtree_last;
 		} linear;
 		struct list_head nonlinear;
+		const char __user *anon_name;
 	} shared;
 
 	/*
@@ -508,5 +523,14 @@ static inline void clear_tlb_flush_pending(struct mm_struct *mm)
 {
 }
 #endif
+
+/* Return the name for an anonymous mapping or NULL for a file-backed mapping */
+static inline const char __user *vma_get_anon_name(struct vm_area_struct *vma)
+{
+	if (vma->vm_file)
+		return NULL;
+
+	return vma->shared.anon_name;
+}
 
 #endif /* _LINUX_MM_TYPES_H */

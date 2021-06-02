@@ -134,10 +134,10 @@ static ssize_t mem_used_total_show(struct device *dev,
 
 	down_read(&zram->init_lock);
 	if (zram->init_done)
-		val = zs_get_total_size_bytes(meta->mem_pool);
+		val = zs_get_total_pages(meta->mem_pool);
 	up_read(&zram->init_lock);
 
-	return sprintf(buf, "%llu\n", val);
+	return sprintf(buf, "%llu\n", val << PAGE_SHIFT);
 }
 
 /* flag operations needs meta->tb_lock */
@@ -223,7 +223,7 @@ static struct zram_meta *zram_meta_alloc(u64 disksize)
 		goto free_buffer;
 	}
 
-	meta->mem_pool = zs_create_pool(GFP_NOIO | __GFP_HIGHMEM);
+	meta->mem_pool = zs_create_pool(GFP_NOIO | __GFP_HIGHMEM, NULL);
 	if (!meta->mem_pool) {
 		pr_err("Error creating memory pool\n");
 		goto free_table;

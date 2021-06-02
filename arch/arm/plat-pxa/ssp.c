@@ -160,6 +160,8 @@ static int pxa_ssp_probe(struct platform_device *pdev)
 		}
 		ssp->drcmr_tx = dma_spec.args[0];
 		of_node_put(dma_spec.np);
+
+		of_property_read_u32(np, "ssp-id", &ssp->port_id);
 	} else {
 		res = platform_get_resource(pdev, IORESOURCE_DMA, 0);
 		if (res == NULL) {
@@ -239,10 +241,11 @@ static int pxa_ssp_remove(struct platform_device *pdev)
 	if (ssp == NULL)
 		return -ENODEV;
 
-	iounmap(ssp->mmio_base);
+	devm_iounmap(&pdev->dev, ssp->mmio_base);
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	release_mem_region(res->start, resource_size(res));
+	if (res)
+		devm_release_mem_region(&pdev->dev, res->start, resource_size(res));
 
 	clk_put(ssp->clk);
 
@@ -250,7 +253,7 @@ static int pxa_ssp_remove(struct platform_device *pdev)
 	list_del(&ssp->node);
 	mutex_unlock(&ssp_lock);
 
-	kfree(ssp);
+	devm_kfree(&pdev->dev, ssp);
 	return 0;
 }
 

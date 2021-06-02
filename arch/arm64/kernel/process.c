@@ -43,6 +43,8 @@
 #include <linux/hw_breakpoint.h>
 #include <linux/personality.h>
 #include <linux/notifier.h>
+#include <linux/debug_locks.h>
+#include <linux/console.h>
 
 #include <asm/compat.h>
 #include <asm/cacheflush.h>
@@ -76,6 +78,32 @@ void soft_restart(unsigned long addr)
 	cpu_reset(addr);
 }
 
+#ifdef CONFIG_ARM64_FLUSH_CONSOLE_ON_RESTART
+void arm_machine_flush_console(void)
+{
+	pr_info("\n");
+	pr_emerg("Restarting %s\n", linux_banner);
+	if (console_trylock()) {
+		console_unlock();
+		return;
+	}
+
+	mdelay(50);
+
+	local_irq_disable();
+	if (!console_trylock())
+		pr_emerg("arm_restart: Console was locked! Busting\n");
+	else
+		pr_emerg("arm_restart: Console was locked!\n");
+	debug_locks_off();
+	console_unlock();
+}
+#else
+void arm_machine_flush_console(void)
+{
+}
+#endif
+
 /*
  * Function pointers to optional machine specific functions
  */
@@ -100,6 +128,16 @@ void arch_cpu_idle(void)
 	}
 }
 
+void arch_cpu_idle_enter(void)
+{
+	idle_notifier_call_chain(IDLE_START);
+}
+
+void arch_cpu_idle_exit(void)
+{
+	idle_notifier_call_chain(IDLE_END);
+}
+
 #ifdef CONFIG_HOTPLUG_CPU
 void arch_cpu_idle_dead(void)
 {
@@ -109,30 +147,29 @@ void arch_cpu_idle_dead(void)
 
 void machine_shutdown(void)
 {
-#ifdef CONFIG_SMP
-	smp_send_stop();
-#endif
+	disable_nonboot_cpus();
 }
 
 void machine_halt(void)
 {
-	machine_shutdown();
+	local_irq_disable();
+	smp_send_stop();
 	while (1);
 }
 
 void machine_power_off(void)
 {
-	machine_shutdown();
+	local_irq_disable();
+	smp_send_stop();
 	if (pm_power_off)
 		pm_power_off();
 }
 
 void machine_restart(char *cmd)
 {
-	machine_shutdown();
-
 	/* Disable interrupts first */
 	local_irq_disable();
+	smp_send_stop();
 
 	/* Now call the architecture specific reboot code. */
 	if (arm_pm_restart)
@@ -141,8 +178,81 @@ void machine_restart(char *cmd)
 	/*
 	 * Whoops - the architecture was unable to reboot.
 	 */
-	printk("Reboot failed -- System halted\n");
+	pr_info("Reboot failed -- System halted\n");
 	while (1);
+}
+
+static void show_data(u64 addr, int nbytes, const char *name)
+{
+	unsigned long bottom, top, first;
+	int i;
+
+	/*
+	 * don't attempt to dump non-kernel addresses or
+	 * values that are probably just small negative numbers
+	 */
+	if (addr < PAGE_OFFSET || addr > -256UL)
+		return;
+	/*
+	 * round address down to a 64 bit boundary
+	 * and always dump a multiple of 64 bytes
+	 */
+	bottom = addr & ~(sizeof(u64) - 1);
+	top = bottom + nbytes;
+	pr_info("%s(0x%016lx to 0x%016lx)\n", name, bottom, top);
+
+	for (first = bottom & ~31; first < top; first += 32) {
+		unsigned long p;
+		char str[sizeof(" 12345678") * 8 + 1];
+
+		memset(str, ' ', sizeof(str));
+		str[sizeof(str) - 1] = '\0';
+
+		for (p = first, i = 0; i < 8 && p < top; i++, p += 4) {
+			if (p >= bottom && p < top) {
+				unsigned int val;
+				if (__get_user(val, (unsigned int *)p) == 0)
+					sprintf(str + i * 9, " %08x", val);
+				else
+					sprintf(str + i * 9, " ********");
+			}
+		}
+		pr_info("%04lx:%s\n", first & 0xffff, str);
+	}
+
+	pr_info("\n");
+}
+
+static void show_extra_register_data(struct pt_regs *regs, int nbytes)
+{
+	int i, top_reg;
+	u64 lr, sp;
+	char s[4];
+	mm_segment_t fs;
+
+	if (compat_user_mode(regs)) {
+		lr = regs->compat_lr;
+		sp = regs->compat_sp;
+		top_reg = 12;
+	} else {
+		lr = regs->regs[30];
+		sp = regs->sp;
+		top_reg = 29;
+	}
+
+	fs = get_fs();
+	set_fs(KERNEL_DS);
+
+	show_data(regs->pc - nbytes, nbytes * 2, "PC: ");
+	show_data(lr - nbytes, nbytes * 2, "LR: ");
+	show_data(regs->pstate - nbytes, nbytes * 2, "PSTATE: ");
+	show_data(sp - nbytes, nbytes * 2, "SP: ");
+	for (i = top_reg; i >= 0; i--) {
+		sprintf(s, "%s%d: ", "R", i);
+		show_data(regs->regs[i] - nbytes, nbytes * 2, s);
+	}
+	pr_info("\n");
+	set_fs(fs);
 }
 
 void __show_regs(struct pt_regs *regs)
@@ -163,20 +273,21 @@ void __show_regs(struct pt_regs *regs)
 	show_regs_print_info(KERN_DEFAULT);
 	print_symbol("PC is at %s\n", instruction_pointer(regs));
 	print_symbol("LR is at %s\n", lr);
-	printk("pc : [<%016llx>] lr : [<%016llx>] pstate: %08llx\n",
+	pr_info("pc : [<%016llx>] lr : [<%016llx>] pstate: %08llx\n",
 	       regs->pc, lr, regs->pstate);
-	printk("sp : %016llx\n", sp);
+	pr_info("sp : %016llx\n", sp);
 	for (i = top_reg; i >= 0; i--) {
-		printk("x%-2d: %016llx ", i, regs->regs[i]);
+		printk("R%-2d: %016llx ", i, regs->regs[i]);
 		if (i % 2 == 0)
 			printk("\n");
 	}
-	printk("\n");
+	pr_info("\n");
+	show_extra_register_data(regs, 128);
 }
 
 void show_regs(struct pt_regs * regs)
 {
-	printk("\n");
+	pr_info("\n");
 	__show_regs(regs);
 }
 
@@ -217,7 +328,7 @@ void release_thread(struct task_struct *dead_task)
 
 int arch_dup_task_struct(struct task_struct *dst, struct task_struct *src)
 {
-	fpsimd_save_state(&current->thread.fpsimd_state);
+	fpsimd_preserve_current_state();
 	*dst = *src;
 	return 0;
 }
@@ -365,3 +476,11 @@ unsigned long randomize_et_dyn(unsigned long base)
 {
 	return randomize_base(base);
 }
+
+#ifdef CONFIG_COMPAT
+unsigned long KSTK_ESP(struct task_struct *task)
+{
+	return (is_compat_thread(task_thread_info(task))) ?
+		(task_pt_regs(task)->compat_sp) : (task_pt_regs(task)->sp);
+}
+#endif

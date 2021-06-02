@@ -128,6 +128,7 @@ extern void release_thread(struct task_struct *);
 unsigned long get_wchan(struct task_struct *p);
 
 #define cpu_relax()			barrier()
+#define cpu_relax_lowlatency()                cpu_relax()
 
 /* Thread switching */
 extern struct task_struct *cpu_switch_to(struct task_struct *prev,
@@ -137,7 +138,12 @@ extern struct task_struct *cpu_switch_to(struct task_struct *prev,
 	((struct pt_regs *)(THREAD_START_SP + task_stack_page(p)) - 1)
 
 #define KSTK_EIP(tsk)	task_pt_regs(tsk)->pc
+
+#ifndef CONFIG_COMPAT
 #define KSTK_ESP(tsk)	task_pt_regs(tsk)->sp
+#else
+extern unsigned long KSTK_ESP(struct task_struct *task);
+#endif
 
 /*
  * Prefetching support

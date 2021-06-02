@@ -873,6 +873,9 @@ static int soc_bind_dai_link(struct snd_soc_card *card, int num)
 		if (dai_link->cpu_dai_name &&
 		    strcmp(cpu_dai->name, dai_link->cpu_dai_name))
 			continue;
+		if (!dai_link->cpu_dai_name &&
+			cpu_dai->id != dai_link->cpu_dai_id)
+			continue;
 
 		rtd->cpu_dai = cpu_dai;
 	}
@@ -900,17 +903,27 @@ static int soc_bind_dai_link(struct snd_soc_card *card, int num)
 		 * this CODEC
 		 */
 		list_for_each_entry(codec_dai, &dai_list, list) {
-			if (codec->dev == codec_dai->dev &&
-				!strcmp(codec_dai->name,
-					dai_link->codec_dai_name)) {
-
-				rtd->codec_dai = codec_dai;
+			if (codec->dev == codec_dai->dev) {
+				if (codec_dai->name && dai_link->codec_dai_name
+				    && !strcmp(codec_dai->name,
+					       dai_link->codec_dai_name)) {
+					rtd->codec_dai = codec_dai;
+				} else if (codec_dai->id ==
+						dai_link->codec_dai_id) {
+					rtd->codec_dai = codec_dai;
+				}
 			}
 		}
 
 		if (!rtd->codec_dai) {
-			dev_err(card->dev, "ASoC: CODEC DAI %s not registered\n",
-				dai_link->codec_dai_name);
+			if (dai_link->codec_dai_name)
+				dev_err(card->dev,
+					"ASoC: CODEC DAI %s not registered\n",
+					dai_link->codec_dai_name);
+			else
+				dev_err(card->dev,
+					"ASoC: CODEC DAI %d not registered\n",
+					dai_link->codec_dai_id);
 			return -EPROBE_DEFER;
 		}
 	}
@@ -1395,6 +1408,7 @@ static int soc_probe_link_dais(struct snd_soc_card *card, int num, int order)
 				return -ENODEV;
 
 			list_add(&cpu_dai->dapm.list, &card->dapm_list);
+			snd_soc_dapm_new_dai_widgets(&cpu_dai->dapm, cpu_dai);
 		}
 
 		if (cpu_dai->driver->probe) {
@@ -2286,9 +2300,13 @@ unsigned int snd_soc_read(struct snd_soc_codec *codec, unsigned int reg)
 {
 	unsigned int ret;
 
-	ret = codec->read(codec, reg);
-	dev_dbg(codec->dev, "read %x => %x\n", reg, ret);
-	trace_snd_soc_reg_read(codec, reg, ret);
+	if (codec->read) {
+		ret = codec->read(codec, reg);
+		dev_dbg(codec->dev, "read %x => %x\n", reg, ret);
+		trace_snd_soc_reg_read(codec, reg, ret);
+	}
+	else
+		ret = -EIO;
 
 	return ret;
 }
@@ -2297,9 +2315,13 @@ EXPORT_SYMBOL_GPL(snd_soc_read);
 unsigned int snd_soc_write(struct snd_soc_codec *codec,
 			   unsigned int reg, unsigned int val)
 {
-	dev_dbg(codec->dev, "write %x = %x\n", reg, val);
-	trace_snd_soc_reg_write(codec, reg, val);
-	return codec->write(codec, reg, val);
+	if (codec->write) {
+		dev_dbg(codec->dev, "write %x = %x\n", reg, val);
+		trace_snd_soc_reg_write(codec, reg, val);
+		return codec->write(codec, reg, val);
+	}
+	else
+		return -EIO;
 }
 EXPORT_SYMBOL_GPL(snd_soc_write);
 
@@ -3234,7 +3256,7 @@ int snd_soc_bytes_put(struct snd_kcontrol *kcontrol,
 	struct soc_bytes *params = (void *)kcontrol->private_value;
 	struct snd_soc_codec *codec = snd_kcontrol_chip(kcontrol);
 	int ret, len;
-	unsigned int val;
+	unsigned int val, mask;
 	void *data;
 
 	if (!codec->using_regmap)
@@ -3264,12 +3286,40 @@ int snd_soc_bytes_put(struct snd_kcontrol *kcontrol,
 			((u8 *)data)[0] |= val;
 			break;
 		case 2:
-			((u16 *)data)[0] &= cpu_to_be16(~params->mask);
-			((u16 *)data)[0] |= cpu_to_be16(val);
+			mask = ~params->mask;
+			/* Maybe need to do be/le translation  */
+			ret = regmap_parse_val(codec->control_data,
+							&mask, &mask);
+			if (ret != 0)
+				goto out;
+
+			((u16 *)data)[0] &= mask;
+
+			/* Maybe need to do be/le translation  */
+			ret = regmap_parse_val(codec->control_data,
+							&val, &val);
+			if (ret != 0)
+				goto out;
+
+			((u16 *)data)[0] |= val;
 			break;
 		case 4:
-			((u32 *)data)[0] &= cpu_to_be32(~params->mask);
-			((u32 *)data)[0] |= cpu_to_be32(val);
+			mask = ~params->mask;
+			/* Maybe need to do be/le translation  */
+			ret = regmap_parse_val(codec->control_data,
+							&mask, &mask);
+			if (ret != 0)
+				goto out;
+
+			((u32 *)data)[0] &= mask;
+
+			/* Maybe need to do be/le translation  */
+			ret = regmap_parse_val(codec->control_data,
+							&val, &val);
+			if (ret != 0)
+				goto out;
+
+			((u32 *)data)[0] |= val;
 			break;
 		default:
 			ret = -EINVAL;
@@ -3720,8 +3770,8 @@ int snd_soc_register_card(struct snd_soc_card *card)
 				link->name);
 			return -EINVAL;
 		}
-		/* Codec DAI name must be specified */
-		if (!link->codec_dai_name) {
+		/* Codec DAI name must be specified if no codec_of_node. */
+		if (!link->codec_dai_name && !link->codec_of_node) {
 			dev_err(card->dev,
 				"ASoC: codec_dai_name not set for %s\n",
 				link->name);

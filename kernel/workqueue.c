@@ -48,7 +48,6 @@
 #include <linux/nodemask.h>
 #include <linux/moduleparam.h>
 #include <linux/uaccess.h>
-
 #include "workqueue_internal.h"
 
 enum {
@@ -1100,6 +1099,7 @@ static void pwq_activate_delayed_work(struct work_struct *work)
 	struct pool_workqueue *pwq = get_work_pwq(work);
 
 	trace_workqueue_activate_work(work);
+
 	move_linked_works(work, &pwq->pool->worklist, NULL);
 	__clear_bit(WORK_STRUCT_DELAYED_BIT, work_data_bits(work));
 	pwq->nr_active++;
@@ -1389,7 +1389,6 @@ retry:
 
 	/* pwq determined, queue */
 	trace_workqueue_queue_work(req_cpu, pwq, work);
-
 	if (WARN_ON(!list_empty(&work->entry))) {
 		spin_unlock(&pwq->pool->lock);
 		return;

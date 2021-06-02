@@ -35,6 +35,10 @@
 #include <asm/system_misc.h>
 #include <asm/pgtable.h>
 #include <asm/tlbflush.h>
+#ifdef CONFIG_SEC_DEBUG
+#include <linux/sec-debug.h>
+#include <linux/arm-coresight.h>
+#endif
 
 static const char *fault_name(unsigned int esr);
 
@@ -89,6 +93,10 @@ static void __do_kernel_fault(struct mm_struct *mm, unsigned long addr,
 	if (fixup_exception(regs))
 		return;
 
+#ifdef CONFIG_SEC_DEBUG
+	arch_stop_trace();
+	stop_ftracing();
+#endif
 	/*
 	 * No handler, we'll have to terminate things with extreme prejudice.
 	 */
@@ -445,6 +453,18 @@ static const char *fault_name(unsigned int esr)
 {
 	const struct fault_info *inf = fault_info + (esr & 63);
 	return inf->name;
+}
+
+void __init hook_fault_code(int nr,
+		int (*fn)(unsigned long, unsigned int, struct pt_regs *),
+		int sig, int code, const char *name)
+{
+	BUG_ON(nr < 0 || nr >= ARRAY_SIZE(fault_info));
+
+	fault_info[nr].fn   = fn;
+	fault_info[nr].sig  = sig;
+	fault_info[nr].code = code;
+	fault_info[nr].name = name;
 }
 
 /*

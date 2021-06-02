@@ -119,6 +119,8 @@ extern s32 i2c_smbus_read_i2c_block_data(const struct i2c_client *client,
 extern s32 i2c_smbus_write_i2c_block_data(const struct i2c_client *client,
 					  u8 command, u8 length,
 					  const u8 *values);
+extern void i2c_set_pio_mode(struct i2c_adapter *adap, unsigned int use_pio);
+extern int i2c_pxa_set_pinstate(struct i2c_adapter *adap, char *name);
 #endif /* I2C */
 
 /**
@@ -430,6 +432,11 @@ struct i2c_adapter {
 
 	/* data fields that are valid for all devices	*/
 	struct rt_mutex bus_lock;
+
+	/* for Marverll i2c */
+	void (*hardware_lock)(struct i2c_adapter *);
+	void (*hardware_unlock)(struct i2c_adapter *);
+	int (*hardware_trylock)(struct i2c_adapter *);
 
 	int timeout;			/* in jiffies */
 	int retries;

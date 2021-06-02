@@ -228,7 +228,7 @@ struct task_group {
 
 #ifdef	CONFIG_SMP
 	atomic_long_t load_avg;
-	atomic_t runnable_avg;
+	atomic_t runnable_avg, usage_avg;
 #endif
 #endif
 
@@ -361,7 +361,7 @@ struct cfs_rq {
 
 #ifdef CONFIG_FAIR_GROUP_SCHED
 	/* Required to track per-cpu representation of a task_group */
-	u32 tg_runnable_contrib;
+	u32 tg_runnable_contrib, tg_usage_contrib;
 	unsigned long tg_load_contrib;
 
 	/*
@@ -593,6 +593,12 @@ struct rq {
 	int active_balance;
 	int push_cpu;
 	struct cpu_stop_work active_balance_work;
+#ifdef CONFIG_SCHED_HMP
+	struct task_struct *migrate_task;
+	int wake_for_idle_pull;
+	unsigned long hmp_flags;
+	int capacity;
+#endif
 	/* cpu of this runqueue: */
 	int cpu;
 	int online;
@@ -806,6 +812,12 @@ static inline unsigned int group_first_cpu(struct sched_group *group)
 }
 
 extern int group_balance_cpu(struct sched_group *sg);
+
+#ifdef CONFIG_SCHED_HMP
+static LIST_HEAD(hmp_domains);
+DECLARE_PER_CPU(struct hmp_domain *, hmp_cpu_domain);
+#define hmp_cpu_domain(cpu)	(per_cpu(hmp_cpu_domain, (cpu)))
+#endif /* CONFIG_SCHED_HMP */
 
 #endif /* CONFIG_SMP */
 

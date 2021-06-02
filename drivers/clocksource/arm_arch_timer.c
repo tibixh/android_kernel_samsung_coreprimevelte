@@ -66,6 +66,7 @@ static int arch_timer_ppi[MAX_TIMER_PPI];
 static struct clock_event_device __percpu *arch_timer_evt;
 
 static bool arch_timer_use_virtual = true;
+static bool arch_timer_c3stop;
 static bool arch_timer_mem_use_virtual;
 
 /*
@@ -218,6 +219,34 @@ static void arch_timer_set_mode_phys_mem(enum clock_event_mode mode,
 	timer_set_mode(ARCH_TIMER_MEM_PHYS_ACCESS, mode, clk);
 }
 
+#ifdef CONFIG_ARM64
+static void arch_timer_enable_phys(u64 match)
+{
+	unsigned long ctrl;
+
+	arch_timer_set_cval(ARCH_TIMER_PHYS_ACCESS, match);
+	ctrl = arch_timer_reg_read_cp15(ARCH_TIMER_PHYS_ACCESS, ARCH_TIMER_REG_CTRL);
+	ctrl |= ARCH_TIMER_CTRL_ENABLE;
+	arch_timer_reg_write_cp15(ARCH_TIMER_PHYS_ACCESS, ARCH_TIMER_REG_CTRL, ctrl);
+}
+
+static void arch_timer_enable_virt(u64 match)
+{
+	unsigned long ctrl;
+
+	arch_timer_set_cval(ARCH_TIMER_VIRT_ACCESS, match);
+	ctrl = arch_timer_reg_read_cp15(ARCH_TIMER_PHYS_ACCESS, ARCH_TIMER_REG_CTRL);
+	ctrl |= ARCH_TIMER_CTRL_ENABLE;
+	arch_timer_reg_write_cp15(ARCH_TIMER_PHYS_ACCESS, ARCH_TIMER_REG_CTRL, ctrl);
+}
+
+static void arch_timer_enable_null(u64 match)
+{
+}
+
+void (*arch_timer_enable)(u64 match) = arch_timer_enable_null;
+#endif
+
 static __always_inline void set_next_event(const int access, unsigned long evt,
 					   struct clock_event_device *clk)
 {
@@ -263,7 +292,8 @@ static void __arch_timer_setup(unsigned type,
 	clk->features = CLOCK_EVT_FEAT_ONESHOT;
 
 	if (type == ARCH_CP15_TIMER) {
-		clk->features |= CLOCK_EVT_FEAT_C3STOP;
+		if (arch_timer_c3stop)
+			clk->features |= CLOCK_EVT_FEAT_C3STOP;
 		clk->name = "arch_sys_timer";
 		clk->rating = 450;
 		clk->cpumask = cpumask_of(smp_processor_id());
@@ -277,6 +307,7 @@ static void __arch_timer_setup(unsigned type,
 			clk->set_next_event = arch_timer_set_next_event_phys;
 		}
 	} else {
+		clk->features |= CLOCK_EVT_FEAT_DYNIRQ;
 		clk->name = "arch_mem_timer";
 		clk->rating = 400;
 		clk->cpumask = cpu_all_mask;
@@ -384,12 +415,18 @@ static u64 arch_counter_get_cntvct_mem(void)
 }
 
 /*
- * Default to cp15 based access because arm64 uses this function for
- * sched_clock() before DT is probed and the cp15 method is guaranteed
- * to exist on arm64. arm doesn't use this before DT is probed so even
- * if we don't have the cp15 accessors we won't have a problem.
+ * Some external users of arch_timer_read_counter (e.g. sched_clock) may try to
+ * call it before it has been initialised. Rather than incur a performance
+ * penalty checking for initialisation, provide a default implementation that
+ * won't lead to time appearing to jump backwards.
  */
-u64 (*arch_timer_read_counter)(void) = arch_counter_get_cntvct;
+static u64 arch_timer_read_zero(void)
+{
+	return 0;
+}
+
+u64 (*arch_timer_read_counter)(void) = arch_timer_read_zero;
+u64 (*arch_timer_get_cval)(void) = arch_timer_read_zero;
 
 static cycle_t arch_counter_read(struct clocksource *cs)
 {
@@ -421,14 +458,35 @@ struct timecounter *arch_timer_get_timecounter(void)
 	return &timecounter;
 }
 
+static DEFINE_SPINLOCK(read_persistent_clock_lock);
+
+void read_persistent_clock(struct timespec *ts)
+{
+	unsigned long long nsecs;
+	static struct timespec persistent_ts;
+	static cycles_t cycles;
+	cycles_t last_cycles;
+	unsigned long flags;
+
+	spin_lock_irqsave(&read_persistent_clock_lock, flags);
+
+	last_cycles = cycles;
+	cycles = arch_timer_read_counter();
+	nsecs = clocksource_cyc2ns(cycles - last_cycles,
+			cyclecounter.mult, cyclecounter.shift);
+
+	timespec_add_ns(&persistent_ts, nsecs);
+	*ts = persistent_ts;
+
+	spin_unlock_irqrestore(&read_persistent_clock_lock, flags);
+}
+
 static void __init arch_counter_register(unsigned type)
 {
 	u64 start_count;
 
 	/* Register the CP15 based counter if we have one */
-	if (type & ARCH_CP15_TIMER)
-		arch_timer_read_counter = arch_counter_get_cntvct;
-	else
+	if (!(type & ARCH_CP15_TIMER))
 		arch_timer_read_counter = arch_counter_get_cntvct_mem;
 
 	start_count = arch_timer_read_counter();
@@ -663,6 +721,22 @@ static void __init arch_timer_init(struct device_node *np)
 			return;
 		}
 	}
+
+	if (arch_timer_use_virtual) {
+		arch_timer_read_counter = arch_counter_get_cntvct;
+#ifdef CONFIG_ARM64
+		arch_timer_get_cval = arch_timer_get_cval_virt;
+		arch_timer_enable = arch_timer_enable_virt;
+#endif
+	} else {
+		arch_timer_read_counter = arch_counter_get_cntpct;
+#ifdef CONFIG_ARM64
+		arch_timer_get_cval = arch_timer_get_cval_phys;
+		arch_timer_enable = arch_timer_enable_phys;
+#endif
+	}
+
+	arch_timer_c3stop = !of_property_read_bool(np, "always-on");
 
 	arch_timer_register();
 	arch_timer_common_init();

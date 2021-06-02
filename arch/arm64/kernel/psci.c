@@ -24,6 +24,9 @@
 #include <asm/errno.h>
 #include <asm/psci.h>
 #include <asm/smp_plat.h>
+#include <asm/suspend.h>
+#include <linux/clk/mmpdcstat.h>
+#include <linux/pxa1936_powermode.h>
 
 #define PSCI_POWER_STATE_TYPE_STANDBY		0
 #define PSCI_POWER_STATE_TYPE_POWER_DOWN	1
@@ -171,8 +174,72 @@ static int psci_migrate(unsigned long cpuid)
 	return psci_to_linux_errno(err);
 }
 
+#ifdef CONFIG_ARM64_CPU_SUSPEND
+/*
+ * use below formula to calculate low power state's bitmap:
+ * bitmap = (1 << state) - 1;
+ *
+ * so the low power state can map to bitmap as:
+ *  0 : b'0000_0000;	1 : b'0000_0001;
+ *  2 : b'0000_0011;	3 : b'0000_0111;
+ *  4 : b'0000_1111;	5 : b'0001_1111;
+ *  6 : b'0011_1111;	7 : b'0111_1111;
+ */
+#define _state2bit(val) ((1 << (val)) - 1)
+
+static int cpu_psci_cpu_suspend(unsigned long arg)
+{
+	int ret;
+	struct psci_power_state state;
+	unsigned int index = *(unsigned int *)arg;
+	int cpu = smp_processor_id();
+
+	/*
+	* The cpu_ops suspend back-end implementation defines arg as
+	* the C-state index. The PSCI back-end has to translate it to a
+	* PSCI requested state using the following look-up.
+	*
+	* C1  - arg == POWER_MODE_CORE_INTIDLE
+	* C2  - arg == POWER_MODE_CORE_POWERDOWN
+	* MP2 - arg == POWER_MODE_MP_POWERDOWN
+	* D1P - arg == POWER_MODE_APPS_IDLE
+	* D1  - arg == POWER_MODE_SYS_SLEEP
+	* D2  - arg == POWER_MODE_UDR
+	*/
+	if (index >= POWER_MODE_CORE_POWERDOWN)
+		state.type = PSCI_POWER_STATE_TYPE_POWER_DOWN;
+	else
+		state.type = PSCI_POWER_STATE_TYPE_STANDBY;
+
+	if (index < POWER_MODE_MP_POWERDOWN)
+		state.affinity_level = AFFINITY_LEVEL0;
+	else if (index == POWER_MODE_MP_POWERDOWN)
+		state.affinity_level = AFFINITY_LEVEL1;
+	else
+		state.affinity_level = AFFINITY_LEVEL2;
+
+	state.id = _state2bit(index);
+
+#ifdef CONFIG_VOLDC_STAT
+	if (index == POWER_MODE_CORE_INTIDLE)
+		vol_dcstat_event(VLSTAT_LPM_ENTRY, 0, 0);
+	else if (index == POWER_MODE_CORE_POWERDOWN)
+		vol_dcstat_event(VLSTAT_LPM_ENTRY, 1, 0);
+#endif
+
+	if (index >= POWER_MODE_MP_POWERDOWN_L2_ON)
+		cpu_dcstat_event(cpu_dcstat_clk, cpu, CPU_M2_OR_DEEPER_ENTER, index);
+
+	cpu_dcstat_event(cpu_dcstat_clk, cpu, CPU_IDLE_ENTER, index);
+
+	ret = psci_ops.cpu_suspend(state, virt_to_phys(cpu_resume));
+
+	return ret;
+}
+#endif
+
 static const struct of_device_id psci_of_match[] __initconst = {
-	{ .compatible = "arm,psci",	},
+	{ .compatible = "arm,psci",},
 	{},
 };
 
@@ -274,6 +341,8 @@ static void cpu_psci_cpu_die(unsigned int cpu)
 	 */
 	struct psci_power_state state = {
 		.type = PSCI_POWER_STATE_TYPE_POWER_DOWN,
+		.affinity_level = AFFINITY_LEVEL2,
+		.id = _state2bit(3),
 	};
 
 	ret = psci_ops.cpu_off(state);
@@ -290,6 +359,9 @@ const struct cpu_operations cpu_psci_ops = {
 #ifdef CONFIG_HOTPLUG_CPU
 	.cpu_disable	= cpu_psci_cpu_disable,
 	.cpu_die	= cpu_psci_cpu_die,
+#endif
+#ifdef CONFIG_ARM64_CPU_SUSPEND
+	.cpu_suspend	= cpu_psci_cpu_suspend,
 #endif
 };
 

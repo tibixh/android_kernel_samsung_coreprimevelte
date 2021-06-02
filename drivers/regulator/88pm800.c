@@ -9,6 +9,7 @@
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
  */
+
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/init.h>
@@ -21,155 +22,108 @@
 #include <linux/io.h>
 #include <linux/of.h>
 #include <linux/regulator/of_regulator.h>
+#include "88pm8xx-regulator.h"
 
-/* LDO1 with DVC[0..3] */
-#define PM800_LDO1_VOUT		(0x08) /* VOUT1 */
-#define PM800_LDO1_VOUT_2	(0x09)
-#define PM800_LDO1_VOUT_3	(0x0A)
-#define PM800_LDO2_VOUT		(0x0B)
-#define PM800_LDO3_VOUT		(0x0C)
-#define PM800_LDO4_VOUT		(0x0D)
-#define PM800_LDO5_VOUT		(0x0E)
-#define PM800_LDO6_VOUT		(0x0F)
-#define PM800_LDO7_VOUT		(0x10)
-#define PM800_LDO8_VOUT		(0x11)
-#define PM800_LDO9_VOUT		(0x12)
-#define PM800_LDO10_VOUT	(0x13)
-#define PM800_LDO11_VOUT	(0x14)
-#define PM800_LDO12_VOUT	(0x15)
-#define PM800_LDO13_VOUT	(0x16)
-#define PM800_LDO14_VOUT	(0x17)
-#define PM800_LDO15_VOUT	(0x18)
-#define PM800_LDO16_VOUT	(0x19)
-#define PM800_LDO17_VOUT	(0x1A)
-#define PM800_LDO18_VOUT	(0x1B)
-#define PM800_LDO19_VOUT	(0x1C)
+static int pm800_set_voltage(struct regulator_dev *rdev,
+			     int min_uv, int max_uv, unsigned *selector)
+{
+	struct pm800_regulator_info *info = rdev_get_drvdata(rdev);
+	int ret, old_selector = -1, best_val = 0;
 
-/* BUCK1 with DVC[0..3] */
-#define PM800_BUCK1		(0x3C)
-#define PM800_BUCK1_1		(0x3D)
-#define PM800_BUCK1_2		(0x3E)
-#define PM800_BUCK1_3		(0x3F)
-#define PM800_BUCK2		(0x40)
-#define PM800_BUCK3		(0x41)
-#define PM800_BUCK3		(0x41)
-#define PM800_BUCK4		(0x42)
-#define PM800_BUCK4_1		(0x43)
-#define PM800_BUCK4_2		(0x44)
-#define PM800_BUCK4_3		(0x45)
-#define PM800_BUCK5		(0x46)
+	if (!info)
+		return -EINVAL;
 
-#define PM800_BUCK_ENA		(0x50)
-#define PM800_LDO_ENA1_1	(0x51)
-#define PM800_LDO_ENA1_2	(0x52)
-#define PM800_LDO_ENA1_3	(0x53)
+	if (info->desc.id == PM800_ID_VOUTSW)
+		return 0;
 
-#define PM800_LDO_ENA2_1	(0x56)
-#define PM800_LDO_ENA2_2	(0x57)
-#define PM800_LDO_ENA2_3	(0x58)
+	ret = regulator_map_voltage_iterate(rdev, min_uv, max_uv);
+	if (ret >= 0) {
+		best_val = rdev->desc->ops->list_voltage(rdev, ret);
+		if (min_uv <= best_val && max_uv >= best_val) {
+			*selector = ret;
+			if (old_selector == *selector)
+				ret = 0;
+			else
+				ret = regulator_set_voltage_sel_regmap(rdev, ret);
+		} else {
+			ret = -EINVAL;
+		}
+	} else {
+		ret = -EINVAL;
+	}
 
-#define PM800_BUCK1_MISC1	(0x78)
-#define PM800_BUCK3_MISC1	(0x7E)
-#define PM800_BUCK4_MISC1	(0x81)
-#define PM800_BUCK5_MISC1	(0x84)
-
-struct pm800_regulator_info {
-	struct regulator_desc desc;
-	int max_ua;
-};
-
-struct pm800_regulators {
-	struct regulator_dev *regulators[PM800_ID_RG_MAX];
-	struct pm80x_chip *chip;
-	struct regmap *map;
-};
-
-/*
- * vreg - the buck regs string.
- * ereg - the string for the enable register.
- * ebit - the bit number in the enable register.
- * amax - the current
- * Buck has 2 kinds of voltage steps. It is easy to find voltage by ranges,
- * not the constant voltage table.
- * n_volt - Number of available selectors
- */
-#define PM800_BUCK(vreg, ereg, ebit, amax, volt_ranges, n_volt)		\
-{									\
-	.desc	= {							\
-		.name	= #vreg,					\
-		.ops	= &pm800_volt_range_ops,			\
-		.type	= REGULATOR_VOLTAGE,				\
-		.id	= PM800_ID_##vreg,				\
-		.owner	= THIS_MODULE,					\
-		.n_voltages		= n_volt,			\
-		.linear_ranges		= volt_ranges,			\
-		.n_linear_ranges	= ARRAY_SIZE(volt_ranges),	\
-		.vsel_reg		= PM800_##vreg,			\
-		.vsel_mask		= 0x7f,				\
-		.enable_reg		= PM800_##ereg,			\
-		.enable_mask		= 1 << (ebit),			\
-	},								\
-	.max_ua		= (amax),					\
+	return ret;
 }
 
-/*
- * vreg - the LDO regs string
- * ereg -  the string for the enable register.
- * ebit - the bit number in the enable register.
- * amax - the current
- * volt_table - the LDO voltage table
- * For all the LDOes, there are too many ranges. Using volt_table will be
- * simpler and faster.
- */
-#define PM800_LDO(vreg, ereg, ebit, amax, ldo_volt_table)		\
-{									\
-	.desc	= {							\
-		.name	= #vreg,					\
-		.ops	= &pm800_volt_table_ops,			\
-		.type	= REGULATOR_VOLTAGE,				\
-		.id	= PM800_ID_##vreg,				\
-		.owner	= THIS_MODULE,					\
-		.n_voltages = ARRAY_SIZE(ldo_volt_table),		\
-		.vsel_reg	= PM800_##vreg##_VOUT,			\
-		.vsel_mask	= 0x1f,					\
-		.enable_reg	= PM800_##ereg,				\
-		.enable_mask	= 1 << (ebit),				\
-		.volt_table	= ldo_volt_table,			\
-	},								\
-	.max_ua		= (amax),					\
+static int pm800_get_voltage(struct regulator_dev *rdev)
+{
+	struct pm800_regulator_info *info = rdev_get_drvdata(rdev);
+	int sel, ret;
+
+	if (!info)
+		return -EINVAL;
+
+	if (info->desc.id == PM800_ID_VOUTSW)
+		return 0;
+
+	sel = regulator_get_voltage_sel_regmap(rdev);
+	if (sel < 0)
+		return sel;
+
+	ret = rdev->desc->ops->list_voltage(rdev, sel);
+
+	return ret;
 }
 
-/* Ranges are sorted in ascending order. */
-static const struct regulator_linear_range buck1_volt_range[] = {
-	REGULATOR_LINEAR_RANGE(600000, 0, 0x4f, 12500),
-	REGULATOR_LINEAR_RANGE(1600000, 0x50, 0x54, 50000),
-};
+int pm800_set_mode(struct regulator_dev *rdev, unsigned int mode)
+{
+	struct pm800_regulator_info *info = rdev_get_drvdata(rdev);
+	unsigned int val, sleep_bit, sleep_enable_mask, reg;
 
-/* BUCK 2~5 have same ranges. */
-static const struct regulator_linear_range buck2_5_volt_range[] = {
-	REGULATOR_LINEAR_RANGE(600000, 0, 0x4f, 12500),
-	REGULATOR_LINEAR_RANGE(1600000, 0x50, 0x72, 50000),
-};
+	sleep_bit = info->sleep_enable_bit;
+	sleep_enable_mask = (0x3 << sleep_bit);
 
-static const unsigned int ldo1_volt_table[] = {
-	600000,  650000,  700000,  750000,  800000,  850000,  900000,  950000,
-	1000000, 1050000, 1100000, 1150000, 1200000, 1300000, 1400000, 1500000,
-};
+	switch (mode) {
+	case REGULATOR_MODE_IDLE:
+		val = (0x2 << sleep_bit);
+		break;
+	case REGULATOR_MODE_NORMAL:
+		val = (0x3 << sleep_bit);
+		break;
+	default:
+		dev_err(rdev_get_dev(rdev), "not supported mode.\n");
+		return -EINVAL;
+	}
 
-static const unsigned int ldo2_volt_table[] = {
-	1700000, 1800000, 1900000, 2000000, 2100000, 2500000, 2700000, 2800000,
-};
+	reg = info->sleep_enable_reg;
 
-/* LDO 3~17 have same voltage table. */
-static const unsigned int ldo3_17_volt_table[] = {
-	1200000, 1250000, 1700000, 1800000, 1850000, 1900000, 2500000, 2600000,
-	2700000, 2750000, 2800000, 2850000, 2900000, 3000000, 3100000, 3300000,
-};
+	return regmap_update_bits(rdev->regmap, reg, sleep_enable_mask, val);
+}
 
-/* LDO 18~19 have same voltage table. */
-static const unsigned int ldo18_19_volt_table[] = {
-	1700000, 1800000, 1900000, 2500000, 2800000, 2900000, 3100000, 3300000,
-};
+static unsigned int pm800_get_optimum_mode(struct regulator_dev *rdev,
+						 int input_uV, int output_uV,
+						 int current_uA)
+{
+	struct pm800_regulator_info *info = rdev_get_drvdata(rdev);
+
+	if (!info) {
+		dev_err(rdev_get_dev(rdev),
+			"return REGULATOR_MODE_IDLE by default\n");
+		return REGULATOR_MODE_IDLE;
+	}
+	if (current_uA < 0) {
+		dev_err(rdev_get_dev(rdev),
+			"return REGULATOR_MODE_IDLE for unexpected current\n");
+		return REGULATOR_MODE_IDLE;
+	}
+	/*
+	 * get_optimum_mode be called at enbale/disable_regulator function.
+	 * If current_uA is not set it will be 0,
+	 * set defult value to be REGULATOR_MODE_IDLE.
+	 */
+	return (MAX_SLEEP_CURRENT > current_uA) ?
+		REGULATOR_MODE_IDLE : REGULATOR_MODE_NORMAL;
+}
 
 static int pm800_get_current_limit(struct regulator_dev *rdev)
 {
@@ -178,18 +132,90 @@ static int pm800_get_current_limit(struct regulator_dev *rdev)
 	return info->max_ua;
 }
 
-static struct regulator_ops pm800_volt_range_ops = {
+static int pm800_set_suspend_mode(struct regulator_dev *rdev, unsigned int mode)
+{
+	struct pm800_regulator_info *info = rdev_get_drvdata(rdev);
+	struct pm80x_chip *chip = info->chip;
+	unsigned int val, sleep_bit, sleep_enable_mask, reg, rid;
+
+	if (!info)
+		return -EINVAL;
+
+	rid = rdev_get_id(rdev);
+	/* only handle 88pm860 buck1 audio mode */
+	if ((rid != PM800_ID_BUCK1) && (rid != PM800_ID_BUCK1A))
+		return -EINVAL;
+
+	sleep_bit = info->sleep_enable_bit;
+	sleep_enable_mask = (0x1 << sleep_bit);
+	reg = info->sleep_enable_reg;
+
+	switch (mode) {
+	case REGULATOR_MODE_NORMAL:
+		val = 0;
+		break;
+	case REGULATOR_MODE_IDLE:
+		val = (0x1 << sleep_bit);
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	return regmap_update_bits(chip->regmap, reg, sleep_enable_mask, val);
+}
+
+static int pm800_set_suspend_voltage(struct regulator_dev *rdev, int uv)
+{
+	int ret, sel, rid;
+	struct pm800_regulator_info *info = rdev_get_drvdata(rdev);
+
+	if (!info || !info->desc.ops)
+		return -EINVAL;
+
+	if (!info->desc.ops->set_suspend_mode)
+		return 0;
+
+	/* only handle pm860 buck1 audio mode */
+	rid = rdev_get_id(rdev);
+	if ((rid != PM800_ID_BUCK1) && (rid != PM800_ID_BUCK1A))
+		return -EINVAL;
+
+	/*
+	 * two steps:
+	 * 1) set the suspend voltage to *_set_slp register
+	 * 2) set regulator mode via set_suspend_mode() interface to enable output
+	 */
+	sel = regulator_map_voltage_linear_range(rdev, uv, uv);
+	if (sel < 0)
+		return -EINVAL;
+
+	sel <<= ffs(PM800_BUCK1_AUDIO_SET_MSK) - 1;
+
+	ret = regmap_update_bits(rdev->regmap, PM800_BUCK1_AUDIO_SET,
+				PM800_BUCK1_AUDIO_SET_MSK, sel);
+	if (ret < 0)
+		return -EINVAL;
+
+	/* TODO: do we need this? */
+	ret = pm800_set_suspend_mode(rdev, REGULATOR_MODE_IDLE);
+	return ret;
+}
+
+struct regulator_ops pm800_volt_range_ops = {
 	.list_voltage = regulator_list_voltage_linear_range,
-	.map_voltage = regulator_map_voltage_linear_range,
-	.set_voltage_sel = regulator_set_voltage_sel_regmap,
-	.get_voltage_sel = regulator_get_voltage_sel_regmap,
+	.set_voltage = pm800_set_voltage,
+	.get_voltage = pm800_get_voltage,
 	.enable = regulator_enable_regmap,
 	.disable = regulator_disable_regmap,
 	.is_enabled = regulator_is_enabled_regmap,
 	.get_current_limit = pm800_get_current_limit,
+	.get_optimum_mode = pm800_get_optimum_mode,
+	.set_mode = pm800_set_mode,
+	.set_suspend_mode = pm800_set_suspend_mode,
+	.set_suspend_voltage = pm800_set_suspend_voltage,
 };
 
-static struct regulator_ops pm800_volt_table_ops = {
+struct regulator_ops pm800_volt_table_ops = {
 	.list_voltage = regulator_list_voltage_table,
 	.map_voltage = regulator_map_voltage_iterate,
 	.set_voltage_sel = regulator_set_voltage_sel_regmap,
@@ -198,82 +224,34 @@ static struct regulator_ops pm800_volt_table_ops = {
 	.disable = regulator_disable_regmap,
 	.is_enabled = regulator_is_enabled_regmap,
 	.get_current_limit = pm800_get_current_limit,
+	.get_optimum_mode = pm800_get_optimum_mode,
+	.set_mode = pm800_set_mode,
 };
 
-/* The array is indexed by id(PM800_ID_XXX) */
-static struct pm800_regulator_info pm800_regulator_info[] = {
-	PM800_BUCK(BUCK1, BUCK_ENA, 0, 3000000, buck1_volt_range, 0x55),
-	PM800_BUCK(BUCK2, BUCK_ENA, 1, 1200000, buck2_5_volt_range, 0x73),
-	PM800_BUCK(BUCK3, BUCK_ENA, 2, 1200000, buck2_5_volt_range, 0x73),
-	PM800_BUCK(BUCK4, BUCK_ENA, 3, 1200000, buck2_5_volt_range, 0x73),
-	PM800_BUCK(BUCK5, BUCK_ENA, 4, 1200000, buck2_5_volt_range, 0x73),
+static int pm800_regulator_dt_init(struct platform_device *pdev,
+	struct of_regulator_match **regulator_matches, int *range)
+{
+	struct pm80x_chip *chip = dev_get_drvdata(pdev->dev.parent);
+	struct device_node *np = pdev->dev.of_node;
 
-	PM800_LDO(LDO1, LDO_ENA1_1, 0, 200000, ldo1_volt_table),
-	PM800_LDO(LDO2, LDO_ENA1_1, 1, 10000, ldo2_volt_table),
-	PM800_LDO(LDO3, LDO_ENA1_1, 2, 300000, ldo3_17_volt_table),
-	PM800_LDO(LDO4, LDO_ENA1_1, 3, 300000, ldo3_17_volt_table),
-	PM800_LDO(LDO5, LDO_ENA1_1, 4, 300000, ldo3_17_volt_table),
-	PM800_LDO(LDO6, LDO_ENA1_1, 5, 300000, ldo3_17_volt_table),
-	PM800_LDO(LDO7, LDO_ENA1_1, 6, 300000, ldo3_17_volt_table),
-	PM800_LDO(LDO8, LDO_ENA1_1, 7, 300000, ldo3_17_volt_table),
-	PM800_LDO(LDO9, LDO_ENA1_2, 0, 300000, ldo3_17_volt_table),
-	PM800_LDO(LDO10, LDO_ENA1_2, 1, 300000, ldo3_17_volt_table),
-	PM800_LDO(LDO11, LDO_ENA1_2, 2, 300000, ldo3_17_volt_table),
-	PM800_LDO(LDO12, LDO_ENA1_2, 3, 300000, ldo3_17_volt_table),
-	PM800_LDO(LDO13, LDO_ENA1_2, 4, 300000, ldo3_17_volt_table),
-	PM800_LDO(LDO14, LDO_ENA1_2, 5, 300000, ldo3_17_volt_table),
-	PM800_LDO(LDO15, LDO_ENA1_2, 6, 300000, ldo3_17_volt_table),
-	PM800_LDO(LDO16, LDO_ENA1_2, 7, 300000, ldo3_17_volt_table),
-	PM800_LDO(LDO17, LDO_ENA1_3, 0, 300000, ldo3_17_volt_table),
-	PM800_LDO(LDO18, LDO_ENA1_3, 1, 200000, ldo18_19_volt_table),
-	PM800_LDO(LDO19, LDO_ENA1_3, 2, 200000, ldo18_19_volt_table),
-};
-
-#define PM800_REGULATOR_OF_MATCH(_name, _id)				\
-	[PM800_ID_##_id] = {						\
-		.name = #_name,						\
-		.driver_data = &pm800_regulator_info[PM800_ID_##_id],	\
+	switch (chip->type) {
+		case CHIP_PM800:
+			*regulator_matches = pm800_regulator_matches;
+			*range = PM800_ID_RG_MAX;
+			break;
+		case CHIP_PM822:
+			*regulator_matches = pm822_regulator_matches;
+			*range = PM822_ID_RG_MAX;
+			break;
+		case CHIP_PM86X:
+			*regulator_matches = pm86x_regulator_matches;
+			*range = PM86X_ID_RG_MAX;
+			break;
+		default:
+			return -ENODEV;
 	}
 
-static struct of_regulator_match pm800_regulator_matches[] = {
-	PM800_REGULATOR_OF_MATCH(buck1, BUCK1),
-	PM800_REGULATOR_OF_MATCH(buck2, BUCK2),
-	PM800_REGULATOR_OF_MATCH(buck3, BUCK3),
-	PM800_REGULATOR_OF_MATCH(buck4, BUCK4),
-	PM800_REGULATOR_OF_MATCH(buck5, BUCK5),
-	PM800_REGULATOR_OF_MATCH(ldo1, LDO1),
-	PM800_REGULATOR_OF_MATCH(ldo2, LDO2),
-	PM800_REGULATOR_OF_MATCH(ldo3, LDO3),
-	PM800_REGULATOR_OF_MATCH(ldo4, LDO4),
-	PM800_REGULATOR_OF_MATCH(ldo5, LDO5),
-	PM800_REGULATOR_OF_MATCH(ldo6, LDO6),
-	PM800_REGULATOR_OF_MATCH(ldo7, LDO7),
-	PM800_REGULATOR_OF_MATCH(ldo8, LDO8),
-	PM800_REGULATOR_OF_MATCH(ldo9, LDO9),
-	PM800_REGULATOR_OF_MATCH(ldo10, LDO10),
-	PM800_REGULATOR_OF_MATCH(ldo11, LDO11),
-	PM800_REGULATOR_OF_MATCH(ldo12, LDO12),
-	PM800_REGULATOR_OF_MATCH(ldo13, LDO13),
-	PM800_REGULATOR_OF_MATCH(ldo14, LDO14),
-	PM800_REGULATOR_OF_MATCH(ldo15, LDO15),
-	PM800_REGULATOR_OF_MATCH(ldo16, LDO16),
-	PM800_REGULATOR_OF_MATCH(ldo17, LDO17),
-	PM800_REGULATOR_OF_MATCH(ldo18, LDO18),
-	PM800_REGULATOR_OF_MATCH(ldo19, LDO19),
-};
-
-static int pm800_regulator_dt_init(struct platform_device *pdev)
-{
-	struct device_node *np = pdev->dev.of_node;
-	int ret;
-
-	ret = of_regulator_match(&pdev->dev, np,
-				 pm800_regulator_matches,
-				 ARRAY_SIZE(pm800_regulator_matches));
-	if (ret < 0)
-		return ret;
-
-	return 0;
+	return of_regulator_match(&pdev->dev, np, *regulator_matches, *range);
 }
 
 static int pm800_regulator_probe(struct platform_device *pdev)
@@ -284,12 +262,14 @@ static int pm800_regulator_probe(struct platform_device *pdev)
 	struct pm800_regulator_info *info;
 	struct regulator_config config = { };
 	struct regulator_init_data *init_data;
-	int i, ret;
+	int i, ret, range = 0;
+	struct of_regulator_match *regulator_matches;
 
 	if (!pdata || pdata->num_regulators == 0) {
 		if (IS_ENABLED(CONFIG_OF)) {
-			ret = pm800_regulator_dt_init(pdev);
-			if (ret)
+			ret = pm800_regulator_dt_init(pdev, &regulator_matches,
+						      &range);
+			if (ret < 0)
 				return ret;
 		} else {
 			return -ENODEV;
@@ -320,19 +300,22 @@ static int pm800_regulator_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, pm800_data);
 
-	for (i = 0; i < PM800_ID_RG_MAX; i++) {
+	for (i = 0; i < range; i++) {
 		if (!pdata || pdata->num_regulators == 0)
-			init_data = pm800_regulator_matches[i].init_data;
+			init_data = regulator_matches->init_data;
 		else
 			init_data = pdata->regulators[i];
-		if (!init_data)
+		if (!init_data) {
+			regulator_matches++;
 			continue;
-		info = pm800_regulator_matches[i].driver_data;
+		}
+		info = regulator_matches->driver_data;
+		info->chip = chip;
 		config.dev = &pdev->dev;
 		config.init_data = init_data;
 		config.driver_data = info;
 		config.regmap = pm800_data->map;
-		config.of_node = pm800_regulator_matches[i].of_node;
+		config.of_node = regulator_matches->of_node;
 
 		pm800_data->regulators[i] =
 				regulator_register(&info->desc, &config);
@@ -346,6 +329,14 @@ static int pm800_regulator_probe(struct platform_device *pdev)
 
 			return ret;
 		}
+
+		pm800_data->regulators[i]->constraints->valid_ops_mask |=
+				(REGULATOR_CHANGE_DRMS | REGULATOR_CHANGE_MODE);
+		pm800_data->regulators[i]->constraints->valid_modes_mask |=
+				(REGULATOR_MODE_NORMAL | REGULATOR_MODE_IDLE);
+		pm800_data->regulators[i]->constraints->input_uV = 1000;
+
+		regulator_matches++;
 	}
 
 	return 0;
@@ -371,7 +362,19 @@ static struct platform_driver pm800_regulator_driver = {
 	.remove		= pm800_regulator_remove,
 };
 
-module_platform_driver(pm800_regulator_driver);
+static int __init pm800_regulator_init(void)
+{
+	return platform_driver_register(&pm800_regulator_driver);
+}
+
+subsys_initcall(pm800_regulator_init);
+
+static void __exit pm800_regulator_exit(void)
+{
+	platform_driver_unregister(&pm800_regulator_driver);
+}
+
+module_exit(pm800_regulator_exit);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Joseph(Yossi) Hanin <yhanin@marvell.com>");
