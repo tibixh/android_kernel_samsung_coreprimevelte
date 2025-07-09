@@ -28,6 +28,8 @@ dtb-$(CONFIG_MACH_COREPRIMEVELTE) += pxa1908-coreprimevelte-00.dtb \
 				pxa1908-coreprimevelte-01.dtb \
 				pxa1908-coreprimevelte-02.dtb
 endif
+dtb-$(CONFIG_MACH_GRANDPRIMEVELTE) += pxa1908-grandprimevelte-00.dtb \
+				pxa1908-grandprimevelte-01.dtb
 
 targets += dtbs
 
