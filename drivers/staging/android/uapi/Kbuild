@@ -1,7 +1,0 @@
-header-y += android_alarm.h
-header-y += ashmem.h
-header-y += binder.h
-header-y += ion.h
-header-y += ion_test.h
-header-y += sw_sync.h
-header-y += sync.h
